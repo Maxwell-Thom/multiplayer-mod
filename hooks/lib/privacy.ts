@@ -18,7 +18,9 @@ const ARTIFACT_READS = new Set(['read', 'list', 'get', 'query']);
 const SECRET_NAME = /^(\.env(\..*)?|\.npmrc|\.netrc|\.pypirc|\.git-credentials|credentials(\..*)?|secrets?(\..*)?|.*\.(pem|key|p12|pfx|keystore|jks)|id_(rsa|ed25519|ecdsa|dsa))$/i;
 const SECRET_DIR = /(^|\/)(\.ssh|\.aws|\.gnupg|\.kube|\.docker|\.config\/gcloud)(\/|$)/i;
 const CREDENTIAL_CMD = /\b(printenv|gh\s+auth\s+token|security\s+find-(generic|internet)-password|op\s+(read|item)|aws\s+configure\s+get|gcloud\s+auth\s+print|az\s+account\s+get-access-token|git\s+credential)\b|(^|[;&|]\s*)env(\s*($|[;&|]))/i;
-const HOME_REF = /(^|[\s"'=])(~[\\/]|~$|\$HOME\b|\$\{HOME\}|%USERPROFILE%|\$env:USERPROFILE)/i;
+const HOME_REF = /(^|[\s"'=(])(~[\\/]|~$)|\$\{?(HOME|USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|XDG_[A-Z_]+)\b|%(USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|HOMEDRIVE)%|\$env:(HOME|USERPROFILE|APPDATA|LOCALAPPDATA)\b/i;
+/** A `..` segment: a path that may climb out of the folder. */
+const CLIMBS = /(^|[\\/])\.\.([\\/]|$)/;
 
 const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
 const isAbs = (p: string) => /^([a-z]:)?\//i.test(p);
@@ -101,19 +103,27 @@ export function privateSource(tool: string, input: unknown, cwd?: string): Priva
     case 'Grep': case 'Glob': {
       const path = str('path');
       if (path) { const s = fileSource(path, cwd); if (s) return s; }
-      const pat = `${str('glob')} ${tool === 'Glob' ? str('pattern') : ''}`;
-      if (/(^|[\s/*])\.env\b|id_rsa|\.ssh\/|\.aws\//i.test(pat)) return SECRETS;
-      if (/(^|\s)(~|\/|[a-z]:)/i.test(pat.trim()) && tool === 'Glob' && !insideFolder(str('pattern').replace(/\*.*$/, ''), cwd)) return OUTSIDE;
+      const pats = [str('glob'), tool === 'Glob' ? str('pattern') : ''].filter(Boolean);
+      if (pats.some((p) => /(^|[\s/*{,])\.env\b|id_rsa|\.ssh\/|\.aws\//i.test(p))) return SECRETS;
+      // Where a pattern starts searching: its part before any wildcard, under the search path.
+      for (const p of pats) {
+        const prefix = p.replace(/[*?[{].*$/, '');
+        const fromRoot = isAbs(norm(prefix)) || /^~/.test(prefix);
+        if (!prefix || (!fromRoot && !CLIMBS.test(prefix))) continue;
+        if (!insideFolder(path && !fromRoot ? `${norm(path)}/${prefix}` : prefix, cwd)) return OUTSIDE;
+      }
       return null;
     }
     case 'Bash': case 'PowerShell': {
       const cmd = str('command');
       if (CREDENTIAL_CMD.test(cmd) || HOME_REF.test(cmd)) return MACHINE;
       if (/(^|[\s"'=<>])(\.env\b|[^\s"']*id_(rsa|ed25519)\b(?!\.pub)|[^\s"']*\.ssh\/)/i.test(cmd)) return SECRETS;
-      // An absolute path elsewhere on the computer.
-      for (const [, p] of cmd.matchAll(/(?:^|[\s"'=<>])((?:[a-z]:)?[\\/][^\s"'|;&<>]+)/gi)) {
-        if (/^\/dev\/(null|stdout|stderr)$/.test(p) || /^\/tmp\b/.test(p)) continue;
-        if (!insideFolder(p, cwd)) return MACHINE;
+      // Any path-like word that lands outside the folder: absolute, from home, or climbing out with `..`.
+      for (const tok of cmd.split(/[\s"'`|;&<>()=,]+/)) {
+        if (!tok || /^[a-z][a-z0-9+.-]*:\/\//i.test(tok)) continue;
+        if (/^\/dev\/(null|stdout|stderr|tty)$/.test(tok) || /^\/tmp(\/|$)/.test(tok)) continue;
+        const pathy = isAbs(norm(tok)) || /^~/.test(tok) || CLIMBS.test(tok) || tok === '..';
+        if (pathy && !insideFolder(tok, cwd)) return MACHINE;
       }
       return null;
     }
