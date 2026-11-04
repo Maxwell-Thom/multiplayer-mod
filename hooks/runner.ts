@@ -47,6 +47,9 @@ const STORE_ACCOUNTS = 'accounts'
 /** Said to the person when the sessions shared turns run in can't sign in. */
 export const SIGN_IN_HELP = 'Shared turns run in a Claude Code session of their own on this machine, and it can’t sign in. Run /login here (a token in CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY doesn’t reach sessions a mod starts).'
 const NO_PROGRAM = 'Multiplayer couldn’t find the Claude Code program on this machine to run shared turns in.'
+// Why a turn stopped when its Claude Code left the space mid-turn (only its runner sees the detail).
+const MOVED_MID_TURN = 'This Claude Code was signed in to another space before the turn finished.'
+const SIGNED_OUT_MID_TURN = 'This Claude Code was signed out of the space before the turn finished.'
 /** The program that started this PowerShell: Claude Code. */
 const PARENT_PS = '(Get-CimInstance Win32_Process -Filter "ProcessId=$((Get-CimInstance Win32_Process -Filter "ProcessId=$PID").ParentProcessId)").ExecutablePath'
 /** The program that started this shell (Linux, then macOS), then `claude` on PATH. */
@@ -89,7 +92,16 @@ export type Active = {
   current: Map<string, number>
   lastDelta: number
   deltaTimer: { cancel: () => void } | null
-  stopped: null | 'server' | 'takeover' | 'gone'
+  /** `left`: this Claude Code signed in to another space, or out of this one, mid-turn. */
+  stopped: null | 'server' | 'takeover' | 'gone' | 'left'
+  /** The space the turn belongs to, as it was when it started: a later switch doesn't move it. */
+  wire: Wire | null
+  spaceId: string
+  /** The branch session's process has ended: what's left is reporting how it went. */
+  exited: boolean
+  /** Settles once the turn's ending has been sent (or given up on). */
+  finished: Promise<void>
+  settle: () => void
   /** Ends the branch session's process (a stop, a take-over). */
   kill: (() => void) | null
   startHead: string | null
@@ -166,7 +178,16 @@ export class Runner {
   handling = new Set<string>()
   cooldown = new Map<string, number>()
   active: Active | null = null
-  combine: { requestId: string; prompt: string; ccTurnId: string | null } | null = null
+  /** Turns whose process ended, still sending how it went. */
+  ending = new Set<Active>()
+  /** Bumped each time this Claude Code leaves a space (for another, or none); `leftWhy` says how. */
+  room = 0
+  leftWhy = ''
+  /** The goodbye to the space it left, while it's being said. */
+  leaving: { spaceId: string; memberId: string; done: Promise<void> } | null = null
+  /** This Claude Code is closing: nothing more goes to any server. */
+  closing = false
+  combine: { requestId: string; prompt: string; ccTurnId: string | null; wire: Wire | null } | null = null
   /** /multiplayer share: the draft this session's Claude is writing (or wrote), and where it goes. */
   share: { prompt: string; branchId: string; ccTurnId: string | null; draft?: string } | null = null
   rateLimits: SessionRateLimit[] = []
@@ -210,6 +231,7 @@ export class Runner {
    */
   async init(io: Port, cwd: string, interactive = true): Promise<void> {
     this.io = io
+    this.closing = false
     this.cwd = cwd
     this.home = (await soft(() => io.home())) || ''
     const memo = await soft(() => io.getMemo())
@@ -242,6 +264,7 @@ export class Runner {
 
   stop(): void {
     this.gen++
+    this.closing = true
     this.phase = 'off'
   }
 
@@ -262,11 +285,10 @@ export class Runner {
    * How a turn ends, sent until the server has it: a network blip at the end of a turn would
    * otherwise lose the answer, and the turn would wait out the lease and run again elsewhere.
    */
-  private async finishCommand(cmd: Command): Promise<void> {
-    const gen = this.gen
+  private async finishCommand(cmd: Command, w: Wire): Promise<void> {
     for (let wait = 1000; ; wait = Math.min(wait * 2, 30_000)) {
-      const w = this.wire
-      if (!w || gen !== this.gen) return
+      // Through the turn's own space, even after a switch; never after this Claude Code said goodbye.
+      if (this.closing) return
       const r = await w.command(cmd)
       if (r.ok || !r.network) return
       if (wait >= 30_000 * 4) return
@@ -378,8 +400,9 @@ export class Runner {
   async refreshPeople(force = false): Promise<void> {
     if (!this.wire || (!force && Date.now() - this.peopleAt < 60_000)) return
     this.peopleAt = Date.now()
-    const snap = await soft(() => this.wire!.snapshot())
-    if (!snap) return
+    const w = this.wire
+    const snap = await soft(() => w.snapshot())
+    if (!snap || w !== this.wire) return
     this.presence = snap.presence
     this.runners = snap.runners
     this.refresh()
@@ -395,6 +418,7 @@ export class Runner {
       await soft(() => this.io.sleep(30_000))
       if (gen !== this.gen || this.phase !== 'superseded' || !this.wire) return
       const snap = await soft(() => this.wire!.snapshot())
+      if (gen !== this.gen) return
       if (!snap) continue
       const mine = snap.runners.find((x) => x.memberId === snap.me)
       if (mine?.connected) continue
@@ -467,8 +491,10 @@ export class Runner {
   }
 
   async resync(): Promise<void> {
-    if (!this.wire) return
-    const snap = await this.wire.snapshot()
+    const w = this.wire
+    if (!w) return
+    const snap = await w.snapshot()
+    if (w !== this.wire) return
     this.peopleAt = Date.now()
     this.state = snap.state
     this.me = snap.me
@@ -480,8 +506,12 @@ export class Runner {
   }
 
   async hello(): Promise<void> {
-    if (!this.wire) return
-    await this.wire.hello(await this.helloInfo(), this.active ? [this.active.turnId] : [], await this.bridgeTools())
+    const w = this.wire
+    if (!w) return
+    const info = await this.helloInfo()
+    const tools = await this.bridgeTools()
+    if (w !== this.wire) return
+    await w.hello(info, this.active ? [this.active.turnId] : [], tools)
   }
 
   /**
@@ -524,7 +554,10 @@ export class Runner {
   /** One long-poll: folds the events in, routes the inbox, reacts. */
   async pollOnce(waitSeconds: number): Promise<'ok' | 'superseded'> {
     if (!this.wire || !this.state) throw new Error('not connected')
-    const r = await this.wire.poll(this.state.seq, waitSeconds)
+    const w = this.wire
+    const r = await w.poll(this.state.seq, waitSeconds)
+    // Signed in again meanwhile (here or to another space): this answer is the old connection's.
+    if (w !== this.wire || !this.state) return 'ok'
     if (r.superseded) return 'superseded'
     // The server restarted and doesn't know this runner: say hello again (with any turn it runs).
     if (r.hello) await soft(() => this.hello())
@@ -775,7 +808,7 @@ export class Runner {
         }
         this.queue.shift()
         if (job.kind === 'combine') await this.submitCombine(job)
-        else await this.runShared(job)
+        else await this.runShared(job).catch((err: Error) => this.runFailed(job.turnId, err))
       }
     } finally {
       this.pumping = false
@@ -783,11 +816,28 @@ export class Runner {
     }
   }
 
-  blankActive(turnId: string, branchId: string): Active {
+  /** A shared turn threw here: free the queue, and end the turn in its space rather than leave it running there. */
+  private runFailed(turnId: string, err: Error): void {
+    this.io.log(`multiplayer: a shared turn failed here: ${err.message}`, true)
+    const a = this.active
+    if (a?.turnId === turnId) {
+      this.active = null
+      a.kill?.()
+      a.settle()
+      const w = a.wire
+      if (w && !a.stopped) void soft(() => this.finishCommand({ type: 'runner.fail', turnId, failure: { reason: 'error', detail: clip(err.message, 300) } }, w))
+    }
+    this.drop(turnId)
+  }
+
+  blankActive(turnId: string, branchId: string, wire: Wire | null = null, spaceId = ''): Active {
+    let settle = () => {}
+    const finished = new Promise<void>((r) => { settle = r })
     return {
       turnId, branchId, label: 'a shared turn', mode: 'normal', parts: 0, private: false, model: '',
       live: '', steps: 0, stepText: new Map(), toolSteps: new Map(), current: new Map(), lastDelta: 0, deltaTimer: null,
-      stopped: null, kill: null, startHead: null, chain: Promise.resolve(), approvals: new Map(),
+      stopped: null, wire, spaceId, exited: false, finished, settle,
+      kill: null, startHead: null, chain: Promise.resolve(), approvals: new Map(),
     }
   }
 
@@ -798,10 +848,10 @@ export class Runner {
     return all && typeof all === 'object' ? (all as Record<string, BranchSession>) : {}
   }
 
-  private async saveBranchSession(branchId: string, bs: BranchSession): Promise<void> {
-    if (!this.session) return
+  private async saveBranchSession(branchId: string, bs: BranchSession, spaceId = this.session?.spaceId): Promise<void> {
+    if (!spaceId) return
     const all = await this.branchSessions()
-    const key = `${this.session.spaceId}:${branchId}`
+    const key = `${spaceId}:${branchId}`
     // Newest first, so the oldest go when there are too many.
     const next: Record<string, BranchSession> = { [key]: bs }
     for (const [k, v] of Object.entries(all).filter(([k]) => k !== key).slice(0, 199)) next[k] = v
@@ -813,8 +863,8 @@ export class Runner {
    * session resumed; else its parent's forked at the branch's fork point (the latest
    * turn up to there that the parent's session ran here, the rest given as notes); else new.
    */
-  private sessionPlan(s: SpaceState, b: Branch, all: Record<string, BranchSession>): { plan: SessionPlan; held: BranchSession } {
-    const key = (id: string) => `${this.session!.spaceId}:${id}`
+  private sessionPlan(s: SpaceState, b: Branch, all: Record<string, BranchSession>, spaceId: string): { plan: SessionPlan; held: BranchSession } {
+    const key = (id: string) => `${spaceId}:${id}`
     const own = all[key(b.id)]
     if (own && !own.rewind) return { plan: { kind: 'resume', id: own.id }, held: own }
     // The session's last turn isn't in the shared history: carry on from the turn before it.
@@ -845,22 +895,33 @@ export class Runner {
     const io = this.io
     let t = this.turn(job.turnId)
     if (!this.mine(t) || !this.wire || !this.state || !this.session) return this.drop(job.turnId)
-    const branch = this.state.branches[t.branchId]
+    // The space as it is now: the turn stays with it, whatever this Claude Code signs in to next.
+    const w = this.wire
+    const sess = this.session
+    const room = this.room
+    const s0 = this.state
+    const branch = s0.branches[t.branchId]
     const exe = await this.findProgram()
     if (!exe) {
-      await this.wire.command({ type: 'runner.fail', turnId: t.id, failure: { reason: 'error', detail: NO_PROGRAM } })
+      await w.command({ type: 'runner.fail', turnId: t.id, failure: { reason: 'error', detail: NO_PROGRAM } })
       return this.drop(t.id)
     }
-    const started = await this.wire.command({ type: 'runner.start', turnId: t.id, model: branch?.model.name || undefined })
+    const started = await w.command({ type: 'runner.start', turnId: t.id, model: branch?.model.name || undefined })
     const token = (started as CommandResponse & { turnToken?: string }).turnToken
+    if (room !== this.room) {
+      // It moved to another space (or out of this one) while the turn was starting.
+      if (started.ok) await soft(() => w.command({ type: 'runner.fail', turnId: t!.id, failure: { reason: 'error', detail: this.leftWhy } }))
+      return this.drop(t.id)
+    }
     if (!started.ok || !token || !branch) {
       this.cooldown.set(t.id, Date.now() + 15_000)
       io.log(`multiplayer: could not start ${this.label(t)}: ${started.error ?? 'no turn token'}`, true)
       return this.drop(t.id)
     }
     t = this.turn(t.id) ?? t
-    const s = this.state
-    const a = this.blankActive(t.id, t.branchId)
+    // Signed in to the same space again meanwhile, its state may be on its way back.
+    const s = this.state ?? s0
+    const a = this.blankActive(t.id, t.branchId, w, sess.spaceId)
     Object.assign(a, { label: this.label(t), mode: t.mode, parts: t.parts.length, private: !!t.private, model: branch.model.name })
     this.active = a
     this.lastBranchId = t.branchId
@@ -872,7 +933,7 @@ export class Runner {
     // reads the branch from the prompt cache. Neither is kept.
     const oneOff = isOneOff(t)
     const aside = t.mode === 'aside'
-    let { plan, held } = t.mode === 'recap' ? { plan: { kind: 'new', id: newSessionId() } as SessionPlan, held: { id: '', through: null, at: {} } as BranchSession } : this.sessionPlan(s, branch, await this.branchSessions())
+    let { plan, held } = t.mode === 'recap' ? { plan: { kind: 'new', id: newSessionId() } as SessionPlan, held: { id: '', through: null, at: {} } as BranchSession } : this.sessionPlan(s, branch, await this.branchSessions(), sess.spaceId)
     if (aside && plan.kind === 'resume') plan = { kind: 'fork', from: plan.id }
     const st = buildSessionTurn(s, t, { heldThrough: held.through, lastState: held.state })
     const conv = s.conversations[branch.conversationId]
@@ -891,7 +952,7 @@ export class Runner {
     const permissionMode = t.plan ? 'plan' as const : baseMode
     const argv = [exe, ...childArgs({
       plan, permissionMode, model: branch.model.name || undefined, effort: branch.model.effort, system: st.system, name,
-      mcpUrl: `${normalizeServer(this.session.server)}/mcp/turn/${this.session.spaceId}/${token}`,
+      mcpUrl: `${normalizeServer(sess.server)}/mcp/turn/${sess.spaceId}/${token}`,
       sites: personal ? [] : s.space.policy.sites, pluginDir: io.pluginRoot || undefined, persist: !oneOff, projectSetup,
       keep: projectSetup ? keptUserSettings(await soft(() => io.userSettings())) : undefined,
     })]
@@ -937,14 +998,15 @@ export class Runner {
       errText = `${errText}\n${(err as Error).message}`
     }
     a.kill = null
+    a.exited = true
 
     // The session keeps a turn that ended with its answer. Any other ending (failed, taken over,
     // or stopped: a stopped process leaves "No response requested." where its partial answer
     // was) is set aside, and the next turn hears it as everyone else's sessions do, word for word.
     const kept = !a.stopped && !!result && !result.isError
     if (!oneOff && sessionId) {
-      if (kept) await this.saveBranchSession(t.branchId, { id: sessionId, through: t.id, at: lastUuid ? { ...held.at, [t.id]: lastUuid } : held.at, state: st.state })
-      else if (plan.kind === 'resume') await this.saveBranchSession(t.branchId, { ...held, rewind: true })
+      if (kept) await this.saveBranchSession(t.branchId, { id: sessionId, through: t.id, at: lastUuid ? { ...held.at, [t.id]: lastUuid } : held.at, state: st.state }, a.spaceId)
+      else if (plan.kind === 'resume') await this.saveBranchSession(t.branchId, { ...held, rewind: true }, a.spaceId)
       // A new or forked session that didn't keep its turn is simply not used again.
     }
     await this.finishShared(a, reader.text, result, rate, errText, reader.thinking)
@@ -953,28 +1015,34 @@ export class Runner {
   private async finishShared(a: Active, text: string, result: Extract<RunEvent, { kind: 'result' }> | undefined, rate: Extract<RunEvent, { kind: 'rate' }> | undefined, errText: string, thinking = ''): Promise<void> {
     const io = this.io
     if (this.active === a) this.active = null
-    a.deltaTimer?.cancel()
-    a.approvals.clear()
-    await this.saveMemo()
-    await a.chain
-    const w = this.wire
-    this.handling.delete(a.turnId)
-    const model = a.model || undefined
-    const answer = (text || result?.text || '').trim()
-    if (!w || a.stopped === 'takeover' || a.stopped === 'gone') { this.refresh(); void this.pump(); return }
-    if (a.stopped === 'server') {
-      await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, model })
-    } else if (result && !result.isError) {
-      const replies = a.mode === 'reveal' ? parseReplies(answer, a.parts) : undefined
-      await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, usage: usageOf(result.usage), model, replies, ...(thinking.trim() ? { thinking: thinking.slice(0, 100_000) } : {}) })
-    } else {
-      const failure = await this.classifyFailure(result, rate, errText)
-      await this.finishCommand({ type: 'runner.fail', turnId: a.turnId, failure })
-      if (failure.reason === 'limit') io.toast(`Multiplayer: limit reached while running ${a.label}${failure.resetsAt ? `; it resets ${when(failure.resetsAt)}` : ''}.`)
+    this.ending.add(a)
+    try {
+      a.deltaTimer?.cancel()
+      a.approvals.clear()
+      await this.saveMemo()
+      await a.chain
+      const w = a.wire ?? this.wire
+      this.handling.delete(a.turnId)
+      const model = a.model || undefined
+      const answer = (text || result?.text || '').trim()
+      if (!w || a.stopped === 'takeover' || a.stopped === 'gone' || a.stopped === 'left') return
+      if (a.stopped === 'server') {
+        await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, model }, w)
+      } else if (result && !result.isError) {
+        const replies = a.mode === 'reveal' ? parseReplies(answer, a.parts) : undefined
+        await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, usage: usageOf(result.usage), model, replies, ...(thinking.trim() ? { thinking: thinking.slice(0, 100_000) } : {}) }, w)
+      } else {
+        const failure = await this.classifyFailure(result, rate, errText)
+        await this.finishCommand({ type: 'runner.fail', turnId: a.turnId, failure }, w)
+        if (failure.reason === 'limit') io.toast(`Multiplayer: limit reached while running ${a.label}${failure.resetsAt ? `; it resets ${when(failure.resetsAt)}` : ''}.`)
+      }
+      await this.reportPush(a)
+    } finally {
+      this.ending.delete(a)
+      a.settle()
+      this.refresh()
+      void this.pump()
     }
-    await this.reportPush(a)
-    this.refresh()
-    void this.pump()
   }
 
   /** Why a branch session ended its turn without an answer. */
@@ -995,9 +1063,10 @@ export class Runner {
 
   private async reportPush(a: Active): Promise<void> {
     const p = await soft(() => G.pushedSince(this.io, a.startHead))
-    if (!p || !this.wire) return
+    const w = a.wire ?? this.wire
+    if (!p || !w) return
     const n = p.commits.length
-    await this.wire.command({ type: 'runner.pushed', push: { branchId: a.branchId, branch: p.branch, commits: p.commits, summary: `${n} commit${n === 1 ? '' : 's'} pushed to ${p.branch}` } })
+    await w.command({ type: 'runner.pushed', push: { branchId: a.branchId, branch: p.branch, commits: p.commits, summary: `${n} commit${n === 1 ? '' : 's'} pushed to ${p.branch}` } })
   }
 
   /** turn.start on this session's main loop: the person's own turn, or the combine we submitted. */
@@ -1029,12 +1098,12 @@ export class Runner {
   }
 
   private scheduleDelta(a: Active): void {
-    if (a.deltaTimer || !this.wire) return
+    if (a.deltaTimer || !(a.wire ?? this.wire)) return
     const send = () => {
       a.deltaTimer = null
       if (this.active !== a || a.stopped || !a.live) return
       a.lastDelta = Date.now()
-      void this.wire?.live({ kind: 'delta', turnId: a.turnId, text: a.live })
+      void (a.wire ?? this.wire)?.live({ kind: 'delta', turnId: a.turnId, text: a.live })
     }
     const wait = 250 - (Date.now() - a.lastDelta)
     if (wait <= 0) send()
@@ -1043,7 +1112,10 @@ export class Runner {
 
   /** Sends commands for one turn in order: a step's `run` before its `done`. */
   private chainCmd(a: Active, cmd: Command): Promise<CommandResponse> {
-    const p = a.chain.then(() => this.wire ? this.wire.command(cmd) : { ok: false, seq: -1 } as CommandResponse)
+    const p = a.chain.then(() => {
+      const w = a.wire ?? this.wire
+      return w ? w.command(cmd) : { ok: false, seq: -1 } as CommandResponse
+    })
     a.chain = p.catch(() => undefined)
     return p
   }
@@ -1179,7 +1251,7 @@ export class Runner {
 
   private async submitCombine(job: Extract<Job, { kind: 'combine' }>): Promise<void> {
     const io = this.io
-    this.combine = { requestId: job.requestId, prompt: job.prompt, ccTurnId: null }
+    this.combine = { requestId: job.requestId, prompt: job.prompt, ccTurnId: null, wire: this.wire }
     io.toast('Multiplayer: asking Claude to combine the conflicting file changes.')
     io.after(0, () => void io.submit(job.prompt, false).then((r) => {
       if (r.drop !== undefined && this.combine?.requestId === job.requestId) this.combine = null
@@ -1191,7 +1263,7 @@ export class Runner {
     this.combine = null
     if (!c) return
     const r = await soft(() => G.finishResolve(this.io))
-    await this.wire?.live({ kind: 'files.report', requestId: c.requestId, report: r?.report ?? { state: 'error', error: 'Could not check the result.' } })
+    await (c.wire ?? this.wire)?.live({ kind: 'files.report', requestId: c.requestId, report: r?.report ?? { state: 'error', error: 'Could not check the result.' } })
   }
 
   // ============================================================ commands
@@ -1250,7 +1322,7 @@ export class Runner {
           const server = normalizeServer(this.opts.server)
           const had = this.account
           const name = this.session?.spaceName
-          if (this.session) { await this.forgetSession(); this.reset() }
+          if (this.session) { await this.forgetSession(); this.reset(SIGNED_OUT_MID_TURN) }
           if (had) await this.forgetAccount(server, true)
           if (!had && !name) return { text: 'Not signed in.' }
           return { text: [had ? `Signed this Claude Code out of Multiplayer${had.email ? ` (${had.email})` : ''}.` : '', name ? `Forgot its sign-in to “${name}”; you’re still a member.` : ''].filter(Boolean).join(' ') }
@@ -1259,7 +1331,7 @@ export class Runner {
           if (!this.session) return { text: 'Not signed in to a space.' }
           const name = this.session.spaceName ?? 'the space'
           await this.forgetSession()
-          this.reset()
+          this.reset(SIGNED_OUT_MID_TURN)
           return { text: `Forgot this Claude Code’s sign-in to “${name}”. You’re still a member; leave the space from the web app if you mean to.` }
         }
         case 'help':
@@ -1272,8 +1344,35 @@ export class Runner {
     }
   }
 
-  private reset(): void {
+  /**
+   * Forgets the space this runner is in. `leaving` says why, when this Claude Code is going to
+   * another space or out of this one: a turn it is running there stops now, its space hears so
+   * at once (and that this Claude Code no longer runs turns there), and nothing in the next space
+   * waits behind it. Left out (signing in to the same space again), a running turn carries on.
+   */
+  private reset(leaving?: string): void {
+    const old = this.wire
+    const was = this.session
+    const a = this.active
     this.gen++
+    if (leaving !== undefined) {
+      this.room++
+      this.leftWhy = leaving
+      // Still running: stop it. One whose session already ended finishes as it would have, in its own space.
+      if (a && !a.stopped && !a.exited) {
+        a.stopped = 'left'
+        a.kill?.()
+        a.deltaTimer?.cancel()
+        a.approvals.clear()
+      }
+      if (a) this.active = null
+      if (old && was) {
+        const done = this.farewell(old, [...(a ? [a] : []), ...this.ending], leaving)
+        const bye = { spaceId: was.spaceId, memberId: was.memberId, done }
+        this.leaving = bye
+        void done.finally(() => { if (this.leaving === bye) this.leaving = null })
+      }
+    }
     this.session = null
     this.wire = null
     this.state = null
@@ -1282,6 +1381,16 @@ export class Runner {
     this.handling.clear()
     this.phase = 'off'
     this.refresh()
+  }
+
+  /** Tells a space this Claude Code is leaving: the turn it stopped there, then goodbye. */
+  private async farewell(w: Wire, turns: Active[], detail: string): Promise<void> {
+    for (const a of turns) {
+      if (a.stopped === 'left') await soft(() => this.chainCmd(a, { type: 'runner.fail', turnId: a.turnId, failure: { reason: 'error', detail } }))
+    }
+    // A turn still sending how it ended goes first: after the goodbye, the space counts it lost.
+    await Promise.race([Promise.all(turns.map((a) => a.finished)), this.io.sleep(15_000)])
+    await soft(() => w.bye())
   }
 
   private helpText(): string {
@@ -1432,12 +1541,16 @@ export class Runner {
     // The web app may live apart from the server (GitHub Pages): links go there.
     const web = (await soft(() => this.serverInfo(server)))?.webUrl
     const stored: StoredSession = { ...s, server, ...(web && web !== server ? { web } : {}) }
-    this.reset()
+    const was = this.session
+    const same = !!was && was.spaceId === s.spaceId && was.memberId === s.memberId && normalizeServer(was.server) === server
+    this.reset(same ? undefined : MOVED_MID_TURN)
     this.session = stored
     await this.saveSession(stored)
     this.paused = false
     await soft(() => io.storeSet(STORE_PAUSED, false))
     this.wire = new Wire(io.fetch, stored, this.runnerSession)
+    const prev = this.leaving
+    if (prev && prev.spaceId === s.spaceId && prev.memberId === s.memberId) await Promise.race([prev.done, io.sleep(20_000)])
     if ((await this.takeOver()) === 'after') io.log('Multiplayer: your other Claude Code is in the middle of a turn of yours. It finishes there, then your turns run here.')
     io.log(`Multiplayer web link (keep it to yourself; it signs in as you): ${webLink(stored)}`)
     return this.session ?? stored
