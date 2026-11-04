@@ -22,6 +22,8 @@ export type Port = {
   // display
   status: (text: string | undefined) => void
   toast: (text: string) => void
+  /** A native notification through the person's own channel (another window, their desktop). */
+  notify?: (text: string, title?: string) => Promise<unknown>
   /** A dim transcript line the model never reads (`debug`: the debug log only). */
   log: (text: string, debug?: boolean) => void
   ask: (question: string, options: AskOptions) => Promise<string>

@@ -1262,6 +1262,9 @@ export class Runner {
     this.io.toast(m.sharing
       ? `Multiplayer: ${a.label} wants ${m.sharing.label}, and everyone in the space reads the answer. Share it? In the web app, or here: /multiplayer allow (once), allow always (for this space), deny.`
       : `Multiplayer: approval needed (${m.title.toLowerCase()}) for ${a.label}. Answer in the web app, or here with /multiplayer allow or /multiplayer deny.`)
+    // A turn waits on this person: a notification through their own channel, so they hear it in another window.
+    const ask = m.sharing ? `Share ${m.sharing.label} in “${this.state?.space.name ?? 'the space'}”?` : m.questions ? 'Claude asks something in a shared turn.' : m.plan !== undefined ? 'Claude’s plan is ready to approve.' : `Approve: ${m.title}`
+    void soft(() => this.io.notify?.(ask, 'Multiplayer'))
     this.refresh()
   }
 

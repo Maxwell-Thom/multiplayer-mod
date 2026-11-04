@@ -100,6 +100,7 @@ export const register: Register = (on, options) => {
       fetch: (url, init) => withTimeout($, $.http.fetch(url, init), fetchTimeout(url)),
       status: (text) => $.ui.status(text),
       toast: (text) => $.ui.toast(text, { timeoutMs: 6000 }),
+      notify: (text, title) => $.ui.notify(text, title ? { title } : undefined),
       log: (text, debug) => $.ui.log(text, { to: debug ? 'debug' : 'transcript' }),
       ask: (question, options) => $.ui.ask(question, options),
       storeGet: (key) => $.store.get(key),
