@@ -75,7 +75,9 @@ export const register: Register = (on, options) => {
       list: async (path) => (await $.fs.list(path)).map((x) => ({ name: x.name, kind: x.kind, size: x.size, mtimeMs: x.mtimeMs })),
       configDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
     }
-    await rt.init(io, started.cwd || e.cwd)
+    // A `claude -p` run or an SDK host (a script, an automatic review) has nobody at the prompt:
+    // it never takes this person's turns over by itself.
+    await rt.init(io, started.cwd || e.cwd, e.isInteractive !== false)
     return started
   })
 

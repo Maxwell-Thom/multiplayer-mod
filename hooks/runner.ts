@@ -200,13 +200,23 @@ export class Runner {
 
   // ================================================================ lifecycle
 
-  /** From session.start: read what is stored and start polling. Never waits on the network. */
-  async init(io: Port, cwd: string): Promise<void> {
+  /**
+   * From session.start: read what is stored and start polling. Never waits on the network.
+   *
+   * Only one Claude Code runs a person's turns, and a new one doesn't take them from another
+   * that is still here: a session nobody is at (`interactive` false: `claude -p`, an SDK host)
+   * never connects by itself, and a new interactive one first asks whether another of theirs is
+   * connected. `/multiplayer resume` moves them on purpose.
+   */
+  async init(io: Port, cwd: string, interactive = true): Promise<void> {
     this.io = io
     this.cwd = cwd
     this.home = (await soft(() => io.home())) || ''
     const memo = await soft(() => io.getMemo())
-    this.runnerSession = memo?.runnerSession || randomId('rs')
+    // The same process going on (a /clear or a resume) or the same session after a reload of
+    // this mod: still the runner it was. Anything else is a new Claude Code.
+    const known = this.runnerSession || memo?.runnerSession || ''
+    this.runnerSession = known || randomId('rs')
     this.paused = (await soft(() => io.storeGet(STORE_PAUSED))) === true
     this.account = (await this.accountFor(normalizeServer(this.opts.server))) ?? null
     this.session = await this.loadSession()
@@ -219,7 +229,10 @@ export class Runner {
       argumentHint: 'start <space> | join <code> [name] | connect <pairing code> | status | open | pause | resume | allow | deny | stop | share <what> | post [text] | take-home | leave',
       immediate: true,
     }))
-    if (this.session && !this.paused) this.connect()
+    if (this.session && !this.paused && interactive) {
+      if (known) this.connect()
+      else void this.connectUnlessElsewhere()
+    }
     if (lost && this.session) {
       const w = new Wire(io.fetch, this.session, this.runnerSession)
       void soft(() => w.command({ type: 'runner.fail', turnId: lost, failure: { reason: 'error', detail: 'Claude Code reloaded the Multiplayer mod while running this turn.' } }))
@@ -377,7 +390,7 @@ export class Runner {
    * folder). Once the server no longer sees it, take the turns back here, so nobody's turns
    * go unrun until they type /multiplayer resume.
    */
-  private async watchSuperseded(gen: number): Promise<void> {
+  private async watchSuperseded(gen: number, again = true): Promise<void> {
     while (gen === this.gen && this.phase === 'superseded') {
       await soft(() => this.io.sleep(30_000))
       if (gen !== this.gen || this.phase !== 'superseded' || !this.wire) return
@@ -385,10 +398,72 @@ export class Runner {
       if (!snap) continue
       const mine = snap.runners.find((x) => x.memberId === snap.me)
       if (mine?.connected) continue
-      this.io.toast('Multiplayer: the other Claude Code signed in as you has gone, so your turns run here again.')
+      this.io.toast(`Multiplayer: the other Claude Code signed in as you has gone, so your turns run here ${again ? 'again' : 'now'}.`)
       this.connect()
       return
     }
+  }
+
+  /**
+   * A new Claude Code with a stored sign-in: if another of this person's is connected and
+   * running their turns (in another window, on another computer), they stay there, and this
+   * one takes over only once that one is gone, or on /multiplayer resume.
+   */
+  private async connectUnlessElsewhere(): Promise<void> {
+    const s = this.session
+    if (!s) return
+    const gen = ++this.gen
+    const w = new Wire(this.io.fetch, s, this.runnerSession)
+    const snap = await soft(() => w.snapshot())
+    if (gen !== this.gen || this.session !== s) return
+    const mine = snap?.runners.find((x) => x.memberId === snap.me)
+    if (!snap || !mine?.connected) { this.connect(); return }
+    this.wire = w
+    this.state = snap.state
+    this.me = snap.me
+    this.presence = snap.presence
+    this.runners = snap.runners
+    this.phase = 'superseded'
+    this.refresh()
+    this.io.toast('Multiplayer: another Claude Code signed in as you is running your turns. Type /multiplayer resume to run them here instead.')
+    void this.watchSuperseded(gen, false)
+  }
+
+  /** A turn of this person's that another of their Claude Codes is running right now. */
+  private turnRunningElsewhere(): Turn | undefined {
+    if (this.active || !this.state) return undefined
+    const mine = this.runners.find((x) => x.memberId === this.me)
+    if (!mine?.connected) return undefined
+    return Object.values(this.state.turns).find((t) => t.runnerId === this.me && !!t.startedAt && (t.status === 'running' || t.status === 'approval'))
+  }
+
+  /**
+   * Taking the turns over on purpose while another Claude Code is in the middle of one: saying
+   * hello now would end that turn, so wait for it to finish there first.
+   */
+  private async connectAfter(turnId: string): Promise<void> {
+    const gen = ++this.gen
+    this.phase = 'superseded'
+    this.refresh()
+    for (let i = 0; i < 1200 && gen === this.gen; i++) {
+      await soft(() => this.io.sleep(3000))
+      if (gen !== this.gen) return
+      await soft(() => this.resync())
+      const t = this.state?.turns[turnId]
+      if (t && (t.status === 'running' || t.status === 'approval')) continue
+      this.connect()
+      return
+    }
+  }
+
+  /** Connect now, or once a turn running in another of this person's Claude Codes ends. Says which. */
+  private async takeOver(): Promise<'now' | 'after'> {
+    if (this.session && !this.wire) this.wire = new Wire(this.io.fetch, this.session, this.runnerSession)
+    await soft(() => this.resync())
+    const busy = this.turnRunningElsewhere()
+    if (busy) { void this.connectAfter(busy.id); return 'after' }
+    this.connect()
+    return 'now'
   }
 
   async resync(): Promise<void> {
@@ -1103,7 +1178,7 @@ export class Runner {
           this.paused = false
           await soft(() => io.storeSet(STORE_PAUSED, false))
           if (!this.session) return { text: 'Not signed in to a space. ' + this.helpText() }
-          this.connect()
+          if ((await this.takeOver()) === 'after') return { text: 'Your other Claude Code is in the middle of a turn of yours. It finishes there, then your turns run here.' }
           return { text: 'Resumed: picking up your turns here.' }
         }
         case 'allow': case 'approve': return { text: await this.answerLocally(rest[0] === 'always' ? 'allow-always' : 'allow-once') }
@@ -1311,8 +1386,7 @@ export class Runner {
     this.paused = false
     await soft(() => io.storeSet(STORE_PAUSED, false))
     this.wire = new Wire(io.fetch, stored, this.runnerSession)
-    await soft(() => this.resync())
-    this.connect()
+    if ((await this.takeOver()) === 'after') io.log('Multiplayer: your other Claude Code is in the middle of a turn of yours. It finishes there, then your turns run here.')
     io.log(`Multiplayer web link (keep it to yourself; it signs in as you): ${webLink(stored)}`)
     return this.session ?? stored
   }
