@@ -333,7 +333,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const mode = cmd.mode === 'view-first' ? 'view-first' : 'normal';
       if (mode === 'view-first') {
         if (!parts.some((p) => p.position)) return fail('Mark at least one part as a position to hold back.');
-        if (!parts.some((p) => !p.position)) return fail('Write the question itself, not only positions.');
+        if (!parts.some((p) => !p.position)) return fail('Add the question first: switch off Claude’s view first and write what you’re asking. Positions stay hidden until Claude has answered it.');
       }
       const out: EventBody[] = [];
       if (b.state === 'parked') {
