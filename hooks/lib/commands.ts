@@ -61,7 +61,8 @@ export type Command =
   | { type: 'runner.step'; turnId: Id; step: Step }
   | { type: 'runner.approval'; turnId: Id; waiting: boolean }
   | { type: 'runner.text'; turnId: Id; text: string }
-  | { type: 'runner.done'; turnId: Id; text: string; usage?: Usage; model?: string; replies?: string[] }
+  /** `thinking`: what Claude thought before it answered, as Claude Code shows it. */
+  | { type: 'runner.done'; turnId: Id; text: string; usage?: Usage; model?: string; replies?: string[]; thinking?: string }
   | { type: 'runner.fail'; turnId: Id; failure: TurnFailure }
   | { type: 'runner.decision'; turnId: Id; text: string; replaces?: string }
   | { type: 'runner.question'; turnId: Id; text: string }

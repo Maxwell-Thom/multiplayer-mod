@@ -66,7 +66,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'runner.step': { turnId: 'id', step: 'obj' },
   'runner.approval': { turnId: 'id', waiting: 'bool' },
   'runner.text': { turnId: 'id', text: 'str:200000' },
-  'runner.done': { turnId: 'id', text: 'str:200000', usage: 'obj?', model: 'str:100?', replies: 'any?' },
+  'runner.done': { turnId: 'id', text: 'str:200000', usage: 'obj?', model: 'str:100?', replies: 'any?', thinking: 'str:100000?' },
   'runner.fail': { turnId: 'id', failure: 'obj' },
   'runner.decision': { turnId: 'id', text: 'str:2000', replaces: 'id?' },
   'runner.question': { turnId: 'id', text: 'str:2000' },

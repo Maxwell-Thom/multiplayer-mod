@@ -36,7 +36,7 @@ export type EventBody =
   | { type: 'turn.resumed'; turnId: Id }
   | { type: 'turn.takeover'; turnId: Id; runnerId: MemberId }
   | { type: 'turn.text'; turnId: Id; text: string }
-  | { type: 'turn.done'; turnId: Id; text: string; usage?: Usage; model?: string; replies?: string[] }
+  | { type: 'turn.done'; turnId: Id; text: string; usage?: Usage; model?: string; replies?: string[]; thinking?: string }
   | { type: 'turn.failed'; turnId: Id; failure: TurnFailure }
   | { type: 'turn.stopped'; turnId: Id; by: MemberId }
   | { type: 'handoff.offered'; handoff: Handoff }

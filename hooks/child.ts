@@ -138,6 +138,12 @@ export class StreamReader {
   private done: string[] = []
   /** The text block streaming now. */
   private partial = ''
+  /** What Claude thought (its thinking blocks), as Claude Code shows it, folded. */
+  private thoughts: string[] = []
+
+  get thinking(): string {
+    return this.thoughts.filter((t) => t.trim()).join('\n\n')
+  }
 
   /** The answer so far: finished blocks, then the one streaming. */
   get text(): string {
@@ -189,6 +195,7 @@ export class StreamReader {
         for (const raw of content) {
           const c = obj(raw)
           if (c.type === 'text' && str(c.text).trim()) { this.done.push(str(c.text)); wrote = true }
+          if (c.type === 'thinking' && str(c.thinking).trim()) this.thoughts.push(str(c.thinking))
           // The plan Claude puts up for approval (plan mode) is part of its answer: everyone reads it.
           if (c.type === 'tool_use' && str(c.name) === 'ExitPlanMode' && str(obj(c.input).plan).trim()) { this.done.push(str(obj(c.input).plan)); wrote = true }
           if (c.type === 'tool_use') out.push({ kind: 'tool', id: str(c.id), name: str(c.name), input: obj(c.input) })

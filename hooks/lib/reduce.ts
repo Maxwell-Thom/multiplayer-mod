@@ -186,7 +186,7 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'turn.text':
       return patchTurn(s, e.turnId, { text: e.text });
     case 'turn.done':
-      s = patchTurn(s, e.turnId, { status: 'done', text: e.text, usage: e.usage, model: e.model ?? s.turns[e.turnId]?.model, replies: e.replies, endedAt: e.at });
+      s = patchTurn(s, e.turnId, { status: 'done', text: e.text, usage: e.usage, model: e.model ?? s.turns[e.turnId]?.model, replies: e.replies, endedAt: e.at, ...(e.thinking ? { thinking: e.thinking } : {}) });
       return releaseLease(s, e.turnId);
     case 'turn.failed': {
       const declined = e.failure.reason === 'limit' || e.failure.reason === 'model-unavailable' || e.failure.reason === 'not-connected' || e.failure.reason === 'not-signed-in';

@@ -945,10 +945,10 @@ export class Runner {
       else if (plan.kind === 'resume') await this.saveBranchSession(t.branchId, { ...held, rewind: true })
       // A new or forked session that didn't keep its turn is simply not used again.
     }
-    await this.finishShared(a, reader.text, result, rate, errText)
+    await this.finishShared(a, reader.text, result, rate, errText, reader.thinking)
   }
 
-  private async finishShared(a: Active, text: string, result: Extract<RunEvent, { kind: 'result' }> | undefined, rate: Extract<RunEvent, { kind: 'rate' }> | undefined, errText: string): Promise<void> {
+  private async finishShared(a: Active, text: string, result: Extract<RunEvent, { kind: 'result' }> | undefined, rate: Extract<RunEvent, { kind: 'rate' }> | undefined, errText: string, thinking = ''): Promise<void> {
     const io = this.io
     if (this.active === a) this.active = null
     a.deltaTimer?.cancel()
@@ -964,7 +964,7 @@ export class Runner {
       await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, model })
     } else if (result && !result.isError) {
       const replies = a.mode === 'reveal' ? parseReplies(answer, a.parts) : undefined
-      await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, usage: usageOf(result.usage), model, replies })
+      await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, usage: usageOf(result.usage), model, replies, ...(thinking.trim() ? { thinking: thinking.slice(0, 100_000) } : {}) })
     } else {
       const failure = await this.classifyFailure(result, rate, errText)
       await this.finishCommand({ type: 'runner.fail', turnId: a.turnId, failure })

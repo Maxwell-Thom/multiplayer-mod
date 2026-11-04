@@ -692,7 +692,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!t || t.runnerId !== actor) return fail('Not your turn.', 'forbidden');
       if (t.status === 'stopped') return ok({ type: 'turn.text', turnId: t.id, text: cmd.text });
       if (!isActive(t)) return fail('That turn already ended.', 'state');
-      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text, usage: cmd.usage, model: cmd.model, replies: cmd.replies });
+      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text, usage: cmd.usage, model: cmd.model, replies: cmd.replies, ...(cmd.thinking?.trim() ? { thinking: cmd.thinking } : {}) });
     }
     case 'runner.fail': {
       const t = s.turns[cmd.turnId];

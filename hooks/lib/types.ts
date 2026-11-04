@@ -167,6 +167,8 @@ export interface Turn {
   mode: TurnMode;
   /** Run in Claude Code's plan mode: Claude plans first (reading only), then builds once its sender approves. */
   plan?: boolean;
+  /** What Claude thought before it answered (shown folded; no session reads it back). */
+  thinking?: string;
   status: TurnStatus;
   requestedAt: number;
   startedAt?: number;
