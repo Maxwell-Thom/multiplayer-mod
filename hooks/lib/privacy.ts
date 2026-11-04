@@ -1,4 +1,3 @@
-// Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
 // What in a shared turn comes from its runner's own world: their accounts, their computer outside
 // the shared project, their screen. Kept with them until they share it (docs/PRIVACY.md).
 
@@ -18,7 +17,7 @@ const ARTIFACT_READS = new Set(['read', 'list', 'get', 'query']);
 const SECRET_NAME = /^(\.env(\..*)?|\.npmrc|\.netrc|\.pypirc|\.git-credentials|credentials(\..*)?|secrets?(\..*)?|.*\.(pem|key|p12|pfx|keystore|jks)|id_(rsa|ed25519|ecdsa|dsa))$/i;
 const SECRET_DIR = /(^|\/)(\.ssh|\.aws|\.gnupg|\.kube|\.docker|\.config\/gcloud)(\/|$)/i;
 const CREDENTIAL_CMD = /\b(printenv|gh\s+auth\s+token|security\s+find-(generic|internet)-password|op\s+(read|item)|aws\s+configure\s+get|gcloud\s+auth\s+print|az\s+account\s+get-access-token|git\s+credential)\b|(^|[;&|]\s*)env(\s*($|[;&|]))/i;
-const HOME_REF = /(^|[\s"'=(])(~[\\/]|~$)|\$\{?(HOME|USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|XDG_[A-Z_]+)\b|%(USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|HOMEDRIVE)%|\$env:(HOME|USERPROFILE|APPDATA|LOCALAPPDATA)\b/i;
+const HOME_REF = /(^|[\s"'=(])~[A-Za-z0-9._-]*([\\/]|$)|\$\{?(HOME|USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|XDG_[A-Z_]+)\b|%(USERPROFILE|APPDATA|LOCALAPPDATA|HOMEPATH|HOMEDRIVE)%|\$env:(HOME|USERPROFILE|APPDATA|LOCALAPPDATA)\b/i;
 /** A `..` segment: a path that may climb out of the folder. */
 const CLIMBS = /(^|[\\/])\.\.([\\/]|$)/;
 
@@ -43,7 +42,8 @@ function resolve(path: string, cwd: string): string {
 /** Under the shared folder? Case-blind for a Windows drive path. */
 export function insideFolder(path: string, cwd: string | undefined): boolean {
   if (!path) return true;
-  if (/^~([\\/]|$)/.test(path)) return false;
+  // ~ and ~name are someone's home.
+  if (/^~/.test(path)) return false;
   if (!cwd) return !isAbs(norm(path)) && !norm(path).split('/').includes('..');
   const p = resolve(path, cwd);
   const root = resolve('.', cwd);
@@ -107,7 +107,9 @@ export function privateSource(tool: string, input: unknown, cwd?: string): Priva
       if (pats.some((p) => /(^|[\s/*{,])\.env\b|id_rsa|\.ssh\/|\.aws\//i.test(p))) return SECRETS;
       // Where a pattern starts searching: its part before any wildcard, under the search path.
       for (const p of pats) {
+        // Can't tell where it searches (a `..` past a wildcard, a brace group from elsewhere): private.
         const prefix = p.replace(/[*?[{].*$/, '');
+        if (/\.\./.test(p.slice(prefix.length)) || /[{,]\s*(\/|\\|~|[a-z]:)/i.test(p)) return OUTSIDE;
         const fromRoot = isAbs(norm(prefix)) || /^~/.test(prefix);
         if (!prefix || (!fromRoot && !CLIMBS.test(prefix))) continue;
         if (!insideFolder(path && !fromRoot ? `${norm(path)}/${prefix}` : prefix, cwd)) return OUTSIDE;
@@ -119,11 +121,16 @@ export function privateSource(tool: string, input: unknown, cwd?: string): Priva
       if (CREDENTIAL_CMD.test(cmd) || HOME_REF.test(cmd)) return MACHINE;
       if (/(^|[\s"'=<>])(\.env\b|[^\s"']*id_(rsa|ed25519)\b(?!\.pub)|[^\s"']*\.ssh\/)/i.test(cmd)) return SECRETS;
       // Any path-like word that lands outside the folder: absolute, from home, or climbing out with `..`.
-      for (const tok of cmd.split(/[\s"'`|;&<>()=,]+/)) {
-        if (!tok || /^[a-z][a-z0-9+.-]*:\/\//i.test(tok)) continue;
-        if (/^\/dev\/(null|stdout|stderr|tty)$/.test(tok) || /^\/tmp(\/|$)/.test(tok)) continue;
+      for (const raw of cmd.split(/[\s"'`|;&<>()=,]+/)) {
+        if (!raw || /^(https?|ftps?|wss?):\/\//i.test(raw)) continue;
+        // A file: URL is a path.
+        const tok = raw.replace(/^file:\/\/(localhost)?/i, '');
         const pathy = isAbs(norm(tok)) || /^~/.test(tok) || CLIMBS.test(tok) || tok === '..';
-        if (pathy && !insideFolder(tok, cwd)) return MACHINE;
+        if (!pathy) continue;
+        // The scratch places, once `..` is folded: /tmp/../etc is /etc.
+        const folded = isAbs(norm(tok)) ? resolve(tok, '/') : '';
+        if (/^\/dev\/(null|stdout|stderr|tty)$/.test(folded) || /^\/tmp(\/|$)/.test(folded)) continue;
+        if (!insideFolder(tok, cwd)) return MACHINE;
       }
       return null;
     }

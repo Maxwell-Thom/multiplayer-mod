@@ -1,6 +1,6 @@
 {
   "name": "multiplayer",
-  "version": "0.1.26",
+  "version": "0.1.27",
   "description": "Runs your turns of a shared Multiplayer conversation in your own Claude Code, on your own plan.",
   "author": {
     "name": "Multiplayer"
