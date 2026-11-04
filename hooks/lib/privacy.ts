@@ -1,3 +1,4 @@
+// Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
 // What in a shared turn comes from its runner's own world: their accounts, their computer outside
 // the shared project, their screen. Kept with them until they share it (docs/PRIVACY.md).
 
@@ -126,24 +127,21 @@ export function privateSource(tool: string, input: unknown, cwd?: string): Priva
       if (CREDENTIAL_CMD.test(cmd) || HOME_REF.test(cmd)) return MACHINE;
       if (/(^|[\s"'=<>])(\.env\b|[^\s"']*id_(rsa|ed25519)\b(?!\.pub)|[^\s"']*\.ssh\/)/i.test(cmd)) return SECRETS;
       // Any path-like word that lands outside the folder: absolute, from home, or climbing out with `..`.
-      // /tmp is scratch, unless the command moves there or links things into it.
-      const scratchOk = !/\b(cd|pushd|ln|mklink|New-Item)\b/i.test(cmd);
+      // Strict on purpose: anything that might reach past the folder counts as private.
       for (const raw of cmd.split(/[\s"'`|;&<>()=,]+/)) {
         if (!raw || /^(https?|ftps?|wss?):\/\//i.test(raw)) continue;
         let tok = raw;
-        // A file: URL is a path; one naming another computer is outside by definition.
+        // A file: URL is a path, decoded; one naming another computer, or that won't decode, is outside.
         if (/^file:/i.test(tok)) {
           const m = /^file:(\/\/([^/]*))?(.*)$/i.exec(tok)!;
           if (m[2] && !/^(localhost|127\.0\.0\.1)$/i.test(m[2])) return MACHINE;
-          tok = m[3] || '/';
+          try { tok = decodeURIComponent(m[3] || '/'); } catch { return MACHINE; }
         }
-        // Absolute as written (a bare / or C:\ too), before any trailing slash is trimmed.
-        const abs = /^([a-z]:)?[\\/]/i.test(tok) || /^[a-z]:$/i.test(tok);
-        const pathy = abs || /^~/.test(tok) || CLIMBS.test(tok) || tok === '..';
-        if (!pathy) continue;
-        // The scratch places, once `..` is folded: /tmp/../etc is /etc.
-        const folded = abs ? resolve(tok, '/') || '/' : '';
-        if (/^\/dev\/(null|stdout|stderr|tty)$/.test(folded) || (scratchOk && /^\/tmp(\/|$)/.test(folded))) continue;
+        // A drive with no slash after it (C:, C:rel) is that drive's current folder: can't tell.
+        if (/^[a-z]:(?![\\/])/i.test(tok)) return MACHINE;
+        const abs = /^([a-z]:)?[\\/]/i.test(tok);
+        if (!abs && !/^~/.test(tok) && !CLIMBS.test(tok) && tok !== '..') continue;
+        if (abs && /^\/dev\/(null|stdout|stderr|tty)$/.test(resolve(tok, '/'))) continue;
         if (!insideFolder(tok, cwd)) return MACHINE;
       }
       return null;

@@ -5,8 +5,8 @@ import {
   activeTurn, branchDecisions, canSee, clip, historyTurns, isActive, isMain, isOneOff, latestTurnId, mainOf,
   memberName, nextDecisionId, nextQuestionId, hhmm, modelLabel, turnsOf,
 } from './helpers.ts';
-import type { Branch, Decision, MergeItem, Part, Policy, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
-import { DEFAULT_POLICY } from './types.ts';
+import type { Branch, Decision, MergeItem, Part, Policy, SharedFile, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
+import { DEFAULT_POLICY, FILE_MAX_BYTES, PART_FILES_MAX } from './types.ts';
 import { invalid } from './validate.ts';
 
 /** Turns a conversation brought in may have in all. */
@@ -303,7 +303,15 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const deny = needWrite(); if (deny) return deny;
       const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
       const text = cmd.text.trim();
-      if (!text) return fail('Write something first.');
+      // Files attached: ones this person uploaded to this branch, a few at a time.
+      let files: Id[] | undefined;
+      if (cmd.files !== undefined) {
+        const fs = cmd.files;
+        if (!Array.isArray(fs) || fs.length > PART_FILES_MAX || fs.some((f) => typeof f !== 'string')) return fail(`Attach up to ${PART_FILES_MAX} files to one part.`);
+        if (fs.some((f) => { const x = s.files?.[f as string]; return !x || x.by !== actor || x.branchId !== b.id || x.from !== 'upload'; })) return fail('Attach a file you uploaded here.');
+        files = fs.length ? [...new Set(fs as Id[])] : undefined;
+      }
+      if (!text && !files) return fail('Write something first.');
       if (text.length > 20000) return fail('That part is too long.');
       if (b.state === 'merged') return fail('That branch was merged. Write in main instead.');
       if (cmd.id && (s.parts[b.id] || []).some((p) => p.id === cmd.id)) return ok(); // already have it (offline replay)
@@ -315,7 +323,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         if (historyTurns(s, b.id).some((t) => t.id === c.id)) return fail('That turn is already part of this branch.');
         cites = c.id;
       }
-      const part: Part = { id: cmd.id || ctx.id('p'), branchId: b.id, memberId: actor as MemberId, text, at: ctx.now, position: cmd.position || undefined, ...(cites ? { cites } : {}) };
+      const part: Part = { id: cmd.id || ctx.id('p'), branchId: b.id, memberId: actor as MemberId, text, at: ctx.now, position: cmd.position || undefined, ...(cites ? { cites } : {}), ...(files ? { files } : {}) };
       return ok({ type: 'part.added', part });
     }
     case 'part.remove': {
@@ -353,7 +361,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         handedFrom = h.from;
         out.push({ type: 'handoff.updated', handoffId: h.id, status: 'taken' });
       }
-      const turn = turnFrom(ctx, s, b, parts.map((p) => ({ memberId: p.memberId, text: p.text, position: p.position || undefined, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) })), {
+      const turn = turnFrom(ctx, s, b, parts.map((p) => ({ memberId: p.memberId, text: p.text, position: p.position || undefined, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}), ...(p.files?.length ? { files: p.files } : {}) })), {
         mode, status: needsOk ? 'held' : 'requested', handedFrom, ...(cmd.plan ? { plan: true } : {}),
       });
       out.push({ type: 'turn.requested', turn, consumed: parts.map((p) => p.id) });
@@ -764,6 +772,18 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const t = s.turns[cmd.turnId];
       if (!t || t.status !== 'paused') return ok();
       return ok({ type: 'turn.resumed', turnId: t.id });
+    }
+    case 'server.file': {
+      // The upload route stored its bytes and says who sent it, where, and from which turn.
+      const f = cmd.file as Partial<SharedFile>;
+      const str = (v: unknown, n: number) => typeof v === 'string' && v.length > 0 && v.length <= n;
+      if (!str(f.id, 64) || !str(f.name, 255) || !str(f.type, 200) || typeof f.size !== 'number' || f.size < 0 || f.size > FILE_MAX_BYTES) return fail('Not a file.');
+      if (f.from !== 'upload' && f.from !== 'claude') return fail('Not a file.');
+      if (!str(f.by, 64) || !s.members[f.by!] || !str(f.branchId, 64) || !s.branches[f.branchId!]) return fail('Not a file.');
+      if (f.turnId !== undefined && (!str(f.turnId, 64) || s.turns[f.turnId!]?.branchId !== f.branchId)) return fail('Not a file.');
+      if (s.files?.[f.id!]) return ok();
+      const file: SharedFile = { id: f.id!, name: f.name!, type: f.type!, size: f.size, by: f.by as MemberId, at: ctx.now, branchId: f.branchId!, from: f.from, ...(f.turnId ? { turnId: f.turnId } : {}) };
+      return ok({ type: 'file.added', file });
     }
     case 'server.note': {
       const t = s.turns[cmd.turnId];

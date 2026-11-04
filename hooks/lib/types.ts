@@ -108,7 +108,28 @@ export interface Part {
   cites?: Id;
   /** Someone else changed this part in an edit (kept when it goes back to the draft). */
   editedBy?: MemberId;
+  /** Files attached to it (SharedFile ids), uploaded first. */
+  files?: Id[];
 }
+
+/** A file someone attached to a prompt, or Claude shared from a turn. Its bytes are on the server. */
+export interface SharedFile {
+  id: Id;
+  name: string;
+  /** Media type, as the browser or the runner said (`image/png`, `application/pdf`...). */
+  type: string;
+  size: number;
+  by: MemberId;
+  at: number;
+  branchId: Id;
+  /** The turn Claude shared it from. */
+  turnId?: Id;
+  from: 'upload' | 'claude';
+}
+
+/** The most a file may be, and how many one part may carry. */
+export const FILE_MAX_BYTES = 25 * 1024 * 1024;
+export const PART_FILES_MAX = 10;
 
 export type TurnMode =
   | 'normal'
@@ -160,7 +181,9 @@ export interface Turn {
   branchId: Id;
   conversationId: Id;
   /** Each person's part. `editedBy`: someone else changed it, in an edit of an earlier turn. */
-  parts: { memberId: MemberId; text: string; position?: boolean; editedBy?: MemberId; cites?: Id }[];
+  parts: { memberId: MemberId; text: string; position?: boolean; editedBy?: MemberId; cites?: Id; files?: Id[] }[];
+  /** Files Claude shared from this turn (SharedFile ids). */
+  files?: Id[];
   senderId: MemberId;
   /** The member whose Claude Code runs it (sender, or whoever took over). */
   runnerId: MemberId;
@@ -369,6 +392,8 @@ export interface SpaceState {
    * (`connector:Gmail`, `outside`...). Each person sees only their own.
    */
   sharing?: Record<MemberId, Record<string, { name: string; at: number }>>;
+  /** Files attached or shared in this space, by id. */
+  files?: Record<Id, SharedFile>;
 }
 
 /** Live, never stored: who is doing what right now. */

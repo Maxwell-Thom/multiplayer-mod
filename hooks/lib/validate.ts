@@ -37,7 +37,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'branch.rename': { branchId: 'id', name: 'str:80' },
   'branch.model': { branchId: 'id', name: 'str:100', effort: 'enum:low|medium|high' },
   'branch.import': { branchId: 'id', source: 'obj', turns: 'any', model: 'str:100?' },
-  'part.add': { branchId: 'id', text: TEXT, position: 'bool?', id: 'id?', cites: 'id?' },
+  'part.add': { branchId: 'id', text: TEXT, position: 'bool?', id: 'id?', cites: 'id?', files: 'any?' },
   'part.remove': { partId: 'id' },
   'turn.send': { branchId: 'id', mode: 'enum:normal|view-first?', handoffId: 'id?', plan: 'bool?' },
   'turn.resolve': { turnId: 'id', pick: 'str:80' },
@@ -75,6 +75,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'server.pause': { turnId: 'id' },
   'server.resume': { turnId: 'id' },
   'server.note': { turnId: 'id', text: 'str:200000' },
+  'server.file': { file: 'obj' },
 };
 
 /** A string usable as a record key: short, and not something every object already has. */

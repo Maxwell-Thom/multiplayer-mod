@@ -50,6 +50,7 @@ export function redactState(full: SpaceState, memberId: MemberId): SpaceState {
     merges: Object.fromEntries(Object.entries(s.merges).filter(([, m]) => !hiddenBranches.has(m.fromBranchId))),
     pushes: s.pushes.filter((p) => !p.branchId || !hiddenBranches.has(p.branchId)),
     notes: Object.fromEntries(Object.entries(s.notes).filter(([, n]) => !hiddenBranches.has(n.branchId))),
+    ...(s.files ? { files: Object.fromEntries(Object.entries(s.files).filter(([, f]) => !hiddenBranches.has(f.branchId) && !(f.turnId && hiddenTurns.has(f.turnId)))) } : {}),
   };
 }
 
@@ -101,6 +102,7 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
     case 'turn.stopped':
       return turnAudience(e.turnId);
     case 'sharing.changed': return [e.memberId];
+    case 'file.added': return e.file.turnId ? turnAudience(e.file.turnId) : branchAudience(e.file.branchId);
     case 'handoff.offered': return branchAudience(e.handoff.branchId);
     case 'handoff.updated': return branchAudience((after.handoffs[e.handoffId] ?? before.handoffs[e.handoffId])?.branchId);
     case 'ask.created': return branchAudience(e.ask.branchId);
@@ -120,6 +122,13 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
     default:
       return null;
   }
+}
+
+/** Whether a member may see (and download) a file: its branch, and its turn when it came from one. */
+export function canSeeFile(s: SpaceState, memberId: MemberId, fileId: string): boolean {
+  const f = s.files?.[fileId];
+  if (!f || !canSee(s, memberId, f.branchId)) return false;
+  return !f.turnId || canSeeTurn(s, memberId, s.turns[f.turnId]);
 }
 
 export function audienceIncludes(audience: MemberId[] | null | undefined, memberId: MemberId): boolean {

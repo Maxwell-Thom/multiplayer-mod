@@ -1,5 +1,5 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import type { FilesPush, Id, ImportSource, ImportTurn, MemberId, MergeChoice, Policy, Role, Step, Turn, TurnFailure, Usage, Member } from './types.ts';
+import type { FilesPush, Id, ImportSource, ImportTurn, MemberId, MergeChoice, Policy, Role, SharedFile, Step, Turn, TurnFailure, Usage, Member } from './types.ts';
 
 /** What people (through the web app or claude.ai) and runners ask the server to do. */
 export type Command =
@@ -26,7 +26,7 @@ export type Command =
   | { type: 'branch.import'; branchId: Id; source: ImportSource; turns: ImportTurn[]; model?: string }
   // writing and sending
   /** `cites`: a finished turn from another branch, brought into this one with the part. */
-  | { type: 'part.add'; branchId: Id; text: string; position?: boolean; id?: Id; cites?: Id }
+  | { type: 'part.add'; branchId: Id; text: string; position?: boolean; id?: Id; cites?: Id; files?: Id[] }
   | { type: 'part.remove'; partId: Id }
   /** `plan`: Claude Code's plan mode: it plans first, and builds once its sender approves the plan. */
   | { type: 'turn.send'; branchId: Id; mode?: 'normal' | 'view-first'; handoffId?: Id; plan?: boolean }
@@ -73,6 +73,8 @@ export type Command =
   // server only
   | { type: 'server.pause'; turnId: Id }
   | { type: 'server.resume'; turnId: Id }
+  /** Its bytes are stored: the file joins the space (the upload route sends this). */
+  | { type: 'server.file'; file: SharedFile }
   | { type: 'server.note'; turnId: Id; text: string };
 
 export type CommandType = Command['type'];

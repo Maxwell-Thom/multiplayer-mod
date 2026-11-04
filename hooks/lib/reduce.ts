@@ -25,6 +25,7 @@ export function emptyState(): SpaceState {
     pushes: [],
     seen: {},
     sharing: {},
+    files: {},
   };
 }
 
@@ -66,6 +67,12 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'member.joined':
       s.members = { ...s.members, [e.member.id]: e.member };
       return s;
+    case 'file.added': {
+      s.files = { ...(s.files ?? {}), [e.file.id]: e.file };
+      const t = e.file.turnId ? s.turns[e.file.turnId] : undefined;
+      if (t && e.file.from === 'claude') return patchTurn(s, t.id, { files: [...(t.files ?? []), e.file.id] });
+      return s;
+    }
     case 'sharing.changed': {
       const mine = { ...(s.sharing?.[e.memberId] ?? {}) };
       if (e.source === '*') for (const k of Object.keys(mine)) delete mine[k];
