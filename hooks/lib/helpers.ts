@@ -278,6 +278,17 @@ export function approvalCard(tool: string, input: Record<string, unknown>): { ti
       const qs = askQuestions(input);
       return qs ? { title: 'Answer Claude’s question', detail: qs.map((q) => q.question).join('\n') } : { title: 'Answer Claude’s question', detail: '' };
     }
+    // Claude Code's artifact tools, made in the person's own Claude Code (BRIDGED_TOOLS).
+    case 'mcp__multiplayer__Artifact': {
+      const action = str(input.action) || 'publish';
+      const what = str(input.title) || str(input.file_path) || str(input.url) || str(input.intent);
+      const title = action === 'delete' ? 'Delete an artifact in your claude.ai account'
+        : action === 'publish' ? (input.url ? 'Update an artifact in your claude.ai account' : 'Publish an artifact in your claude.ai account')
+        : `Use your claude.ai artifacts (${clip(action, 30)})`;
+      return { title, detail: what };
+    }
+    case 'mcp__multiplayer__ArtifactData': return { title: 'Change an artifact’s data in your claude.ai account', detail: str(input.url) };
+    case 'mcp__multiplayer__ArtifactComments': return { title: 'Use an artifact’s comments in your claude.ai account', detail: str(input.url) };
     case 'WebFetch': {
       const url = str(input.url);
       return { title: 'Fetch a page', detail: url, site: siteOf(url) };

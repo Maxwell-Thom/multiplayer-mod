@@ -28,7 +28,7 @@ import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './
 import { apply } from './lib/reduce.ts'
 import type { Port } from './port.ts'
 import type { Branch, MemberId, Presence, RunnerInfo, SpaceState, Step, Turn, TurnFailure, TurnMode, Usage } from './lib/types.ts'
-import type { CommandResponse, RunnerHello, RunnerInbound } from './lib/wire.ts'
+import { BRIDGED_TOOLS, type CommandResponse, type RunnerHello, type RunnerInbound } from './lib/wire.ts'
 
 export const PLUGIN = 'multiplayer'
 export const PANE = 'multiplayer'
@@ -481,7 +481,31 @@ export class Runner {
 
   async hello(): Promise<void> {
     if (!this.wire) return
-    await this.wire.hello(await this.helloInfo(), this.active ? [this.active.turnId] : [])
+    await this.wire.hello(await this.helloInfo(), this.active ? [this.active.turnId] : [], await this.bridgeTools())
+  }
+
+  /**
+   * The tools a turn's background session lacks that this interactive Claude Code has
+   * (artifacts, which `-p` leaves off): its turns get them through this mod.
+   */
+  private async bridgeTools(): Promise<RunnerHello['tools']> {
+    const all = (await soft(() => this.io.listTools?.() ?? Promise.resolve([]))) ?? []
+    const want = new Set<string>(BRIDGED_TOOLS)
+    return all.filter((t) => want.has(t.name)).map((t) => ({ name: t.name, description: t.description }))
+  }
+
+  /** A turn's session called a bridged tool: make the call here, for the turn this runner runs. */
+  private async bridged(m: Extract<RunnerInbound, { kind: 'tool.request' }>): Promise<void> {
+    const answer = (text: string, isError?: boolean) => void soft(() => this.wire!.live({ kind: 'tool.result', requestId: m.requestId, text, ...(isError ? { isError: true } : {}) }))
+    if (!this.wire) return
+    if (this.active?.turnId !== m.turnId) return answer('That shared turn isn’t running here.', true)
+    if (!(BRIDGED_TOOLS as readonly string[]).includes(m.tool) || !this.io.callTool) return answer(`${m.tool} isn’t available here.`, true)
+    try {
+      const r = await this.io.callTool(m.tool, m.input)
+      answer(r.text, r.isError)
+    } catch (err) {
+      answer(`${m.tool} failed: ${(err as Error).message}`, true)
+    }
   }
 
   async helloInfo(): Promise<RunnerHello['info']> {
@@ -530,6 +554,7 @@ export class Runner {
       if (m.kind === 'approval.request') this.onApproval(m)
       else if (m.kind === 'approval.cleared') this.onApprovalCleared(m.turnId, m.requestId)
       else if (m.kind === 'files.request') void this.files(m.requestId, m.action)
+      else if (m.kind === 'tool.request') void this.bridged(m)
       else if (m.kind === 'pause' || m.kind === 'resume') void this.setPaused(m.kind === 'pause')
     }
   }

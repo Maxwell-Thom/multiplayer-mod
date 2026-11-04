@@ -107,8 +107,8 @@ export class Wire {
     return call<Snapshot>(this.fetch, `${this.base}/snapshot`, 'GET', this.token)
   }
 
-  hello(info: RunnerHello['info'], running: string[]): Promise<{ ok: boolean; seq: number }> {
-    return call(this.fetch, `${this.base}/runner/hello`, 'POST', this.token, { info, running, session: this.runnerSession })
+  hello(info: RunnerHello['info'], running: string[], tools?: RunnerHello['tools']): Promise<{ ok: boolean; seq: number }> {
+    return call(this.fetch, `${this.base}/runner/hello`, 'POST', this.token, { info, running, session: this.runnerSession, ...(tools?.length ? { tools } : {}) })
   }
 
   poll(after: number, waitSeconds: number): Promise<PollResponse> {

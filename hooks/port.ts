@@ -69,6 +69,13 @@ export type Port = {
   /** CLAUDE_CONFIG_DIR, where this Claude Code keeps its sessions (unset: ~/.claude). */
   configDir: () => Promise<string | undefined>
   write: (path: string, text: string) => Promise<void>
+  /** The tools this interactive session has, with their descriptions. */
+  listTools?: () => Promise<{ name: string; description: string }[]>
+  /**
+   * Calls one of them here, for a shared turn whose person already allowed it in Multiplayer:
+   * the answer as the model would read it.
+   */
+  callTool?: (tool: string, input: Record<string, unknown>) => Promise<{ text: string; isError?: boolean }>
 }
 
 /** The part of the port the git helpers use. */

@@ -54,6 +54,21 @@ export interface RunnerHello {
   info: Omit<RunnerInfo, 'memberId' | 'connected' | 'at'>;
   /** Turns this runner is still running right now (after a reconnect). */
   running?: Id[];
+  /** Tools of the person's interactive Claude Code its turns can use through it (BRIDGED_TOOLS it has). Kept by the server, shown to nobody. */
+  tools?: BridgeTool[];
+}
+
+/**
+ * Tools a turn's background session (`claude -p`) doesn't get, which the person's own
+ * interactive Claude Code has: the mod there makes the call for the turn. Artifacts are off
+ * in `-p` with no switch to turn them on.
+ */
+export const BRIDGED_TOOLS = ['Artifact', 'ArtifactData', 'ArtifactComments'] as const;
+
+/** A bridged tool as the person's Claude Code describes it. */
+export interface BridgeTool {
+  name: string;
+  description: string;
 }
 
 /** What a runner sends besides commands. */
@@ -61,7 +76,9 @@ export type RunnerOutbound =
   | { kind: 'delta'; turnId: Id; text: string }
   /** An answer typed at the runner (/multiplayer allow) to a permission question its turn's session asked. */
   | { kind: 'approval.answer'; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny'; answers?: Record<string, string> }
-  | { kind: 'files.report'; requestId?: string; report: FilesReport };
+  | { kind: 'files.report'; requestId?: string; report: FilesReport }
+  /** What a bridged tool answered, for the turn's session that asked. */
+  | { kind: 'tool.result'; requestId: string; text: string; isError?: boolean };
 
 /** What the server or the member's web app asks of their runner. */
 export type RunnerInbound =
@@ -69,6 +86,8 @@ export type RunnerInbound =
   | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[] }
   | { kind: 'approval.cleared'; turnId: Id; requestId: string }
   | { kind: 'files.request'; requestId: string; action: FilesAction }
+  /** A turn's session calls a bridged tool: make the call in this Claude Code and answer with tool.result. */
+  | { kind: 'tool.request'; turnId: Id; requestId: string; tool: string; input: Record<string, unknown> }
   /** Stop or start picking up turns (from the person's own web app). */
   | { kind: 'pause' }
   | { kind: 'resume' }

@@ -19,6 +19,19 @@ export const register: Register = (on, options) => {
   })
   /** Set in a branch session this mod started for a shared turn: only the privacy filter runs there. */
   let child: 'shared' | 'private' | null = null
+  /**
+   * Bridged calls this mod is making here for a shared turn, by tool: their person allowed each
+   * in Multiplayer already, so this session doesn't ask again. Only this mod's own calls (never
+   * the model's, whose origin is the engine).
+   */
+  const bridging = new Map<string, number>()
+
+  on('tool.check', async ($, e, next) => {
+    if (!child && next.origin.plugin === $.plugin.name && (bridging.get(e.tool) ?? 0) > 0) {
+      return { decision: 'allow', reason: 'Allowed in Multiplayer by its owner, for their shared turn.' }
+    }
+    return next(e)
+  })
 
   on('session.start', async ($, e, next) => {
     const started = await next(e)
@@ -74,6 +87,17 @@ export const register: Register = (on, options) => {
       write: (path, text) => $.fs.write(path, text),
       list: async (path) => (await $.fs.list(path)).map((x) => ({ name: x.name, kind: x.kind, size: x.size, mtimeMs: x.mtimeMs })),
       configDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
+      listTools: async () => (await $.tool.list()).map((t) => ({ name: t.name, description: t.description })),
+      callTool: async (tool, input) => {
+        bridging.set(tool, (bridging.get(tool) ?? 0) + 1)
+        try {
+          const r = await $.tool.call({ ...input, tool } as never)
+          if (r.deny) return { text: r.deny, isError: true }
+          return { text: r.text ?? '', ...(r.isError ? { isError: true } : {}) }
+        } finally {
+          bridging.set(tool, (bridging.get(tool) ?? 1) - 1)
+        }
+      },
     }
     // A `claude -p` run or an SDK host (a script, an automatic review) has nobody at the prompt:
     // it never takes this person's turns over by itself.
