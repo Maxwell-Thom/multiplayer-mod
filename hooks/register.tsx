@@ -6,6 +6,7 @@ import type { Register } from 'claude-code'
 
 import type { MultiplayerView } from '../types'
 import type { Port } from './port.ts'
+import { privateSource } from './lib/privacy.ts'
 import { EMPTY_VIEW, PANE, Runner } from './runner.ts'
 
 /** JSON with every object's keys in order, so the same input always reads the same. */
@@ -58,8 +59,23 @@ export const register: Register = (on, options) => {
   // Exactly the call allowed: the tool and its input (keys in order), never just the tool.
   const callKey = (tool: string, input: unknown) => `${tool}\u0000${canonical(input)}`
 
+  /** In a shared turn's session: where to ask what its person shares in this space (docs/PRIVACY.md). */
+  let sharedUrl = ''
+
   on('tool.check', async ($, e, next) => {
     const r = await next(e)
+    // Something from the person's own world that would run without asking (an allow rule, auto
+    // mode), in a turn others read: unless they share it here, ask, so the share card comes up.
+    if (child === 'shared' && sharedUrl && r.decision === 'allow') {
+      const src = privateSource(e.tool, e.input, await $.session.cwd())
+      if (src) {
+        const res = await $.http.fetch(sharedUrl).catch(() => null)
+        let shared: unknown = null
+        try { shared = res && res.ok ? (JSON.parse(res.text) as { shared?: unknown }).shared : null } catch { shared = null }
+        // Not sure what's shared: ask rather than guess.
+        if (!Array.isArray(shared) || !shared.includes(src.id)) return { ...r, decision: 'ask', reason: `Shares ${src.label} with the space.` }
+      }
+    }
     if (!child && r.decision === 'ask' && next.origin.plugin === $.plugin.name && (bridging.get(callKey(e.tool, e.input)) ?? 0) > 0) {
       return { ...r, decision: 'allow', reason: 'Allowed in Multiplayer by its owner, for their shared turn.' }
     }
@@ -71,6 +87,7 @@ export const register: Register = (on, options) => {
     const role = await $.env.get('MULTIPLAYER_CHILD')
     if (role) {
       child = role === 'private' ? 'private' : 'shared'
+      sharedUrl = (await $.env.get('MULTIPLAYER_SHARED_URL')) ?? ''
       return started
     }
     // Everything the runner does on the engine, each spelled as a call on `$`.

@@ -23,6 +23,7 @@ export const IMPORT_STEPS = 300;
 const SPECS: Record<Command['type'], Spec> = {
   'member.rename': { name: 'str:80' },
   'member.notify': { notify: 'enum:needed|all|off' },
+  'sharing.set': { source: 'str:200', name: 'str:100', on: 'bool' },
   'member.role': { memberId: 'id', role: 'enum:host|prompter|viewer' },
   'member.leave': { handTo: 'id?', end: 'bool?' },
   'member.remove': { memberId: 'id' },
@@ -64,7 +65,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'runner.check': { turnId: 'id', conflict: 'obj' },
   'runner.start': { turnId: 'id', model: 'str:100?' },
   'runner.step': { turnId: 'id', step: 'obj' },
-  'runner.approval': { turnId: 'id', waiting: 'bool' },
+  'runner.approval': { turnId: 'id', waiting: 'bool', sharing: 'bool?' },
   'runner.text': { turnId: 'id', text: 'str:200000' },
   'runner.done': { turnId: 'id', text: 'str:200000', usage: 'obj?', model: 'str:100?', replies: 'any?', thinking: 'str:100000?' },
   'runner.fail': { turnId: 'id', failure: 'obj' },

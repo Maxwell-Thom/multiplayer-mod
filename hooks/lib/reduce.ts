@@ -24,6 +24,7 @@ export function emptyState(): SpaceState {
     notes: {},
     pushes: [],
     seen: {},
+    sharing: {},
   };
 }
 
@@ -65,6 +66,14 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'member.joined':
       s.members = { ...s.members, [e.member.id]: e.member };
       return s;
+    case 'sharing.changed': {
+      const mine = { ...(s.sharing?.[e.memberId] ?? {}) };
+      if (e.source === '*') for (const k of Object.keys(mine)) delete mine[k];
+      else if (e.on) mine[e.source] = { name: e.name, at: e.at };
+      else delete mine[e.source];
+      s.sharing = { ...(s.sharing ?? {}), [e.memberId]: mine };
+      return s;
+    }
     case 'member.updated': {
       const m = s.members[e.memberId];
       if (m) s.members = { ...s.members, [e.memberId]: { ...m, ...e.patch } };
@@ -73,6 +82,8 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'member.left': {
       const m = s.members[e.memberId];
       if (m) s.members = { ...s.members, [e.memberId]: { ...m, leftAt: e.at } };
+      // Leaving ends whatever they shared here.
+      if (s.sharing?.[e.memberId]) { const { [e.memberId]: _gone, ...rest } = s.sharing; s.sharing = rest; }
       return s;
     }
     case 'space.policy':
@@ -171,7 +182,7 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'turn.approval': {
       const t = s.turns[e.turnId];
       if (!t || (t.status !== 'running' && t.status !== 'approval')) return s;
-      return patchTurn(s, e.turnId, { status: e.waiting ? 'approval' : 'running' });
+      return patchTurn(s, e.turnId, { status: e.waiting ? 'approval' : 'running', askingToShare: e.waiting && e.sharing ? true : undefined });
     }
     case 'turn.paused':
       return patchTurn(s, e.turnId, { status: 'paused', pausedAt: e.at });

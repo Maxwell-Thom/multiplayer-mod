@@ -70,7 +70,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
   if (isRunnerCmd && ctx.source !== 'runner' && ctx.source !== 'mcp') return fail('Only a runner can report on turns.', 'forbidden');
 
   const ended = !!s.space.endedAt;
-  if (ended && !['seen', 'member.notify'].includes(cmd.type)) return fail('This space has ended. It is read-only.', 'ended');
+  if (ended && !['seen', 'member.notify', 'sharing.set'].includes(cmd.type)) return fail('This space has ended. It is read-only.', 'ended');
 
   const role = me?.role;
   const canWrite = isServer || role === 'host' || role === 'prompter';
@@ -96,6 +96,12 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
     }
     case 'member.notify':
       return ok({ type: 'member.updated', memberId: actor as MemberId, patch: { notify: cmd.notify } });
+    case 'sharing.set': {
+      // Only for yourself, and only to stop sharing everything at once with '*'.
+      if (cmd.source === '*' && cmd.on) return fail('Share one source at a time.');
+      if (!cmd.on && cmd.source !== '*' && !s.sharing?.[actor]?.[cmd.source]) return fail('That isn’t shared here.');
+      return ok({ type: 'sharing.changed', memberId: actor as MemberId, source: cmd.source, name: cmd.name.trim() || cmd.source, on: cmd.on });
+    }
     case 'member.limit-clear':
       return ok({ type: 'member.updated', memberId: actor as MemberId, patch: { limit: null } });
     case 'member.role': {
@@ -680,7 +686,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
     case 'runner.approval': {
       const t = s.turns[cmd.turnId];
       if (!t || t.runnerId !== actor || !isActive(t)) return fail('Not running.', 'state');
-      return ok({ type: 'turn.approval', turnId: t.id, waiting: cmd.waiting });
+      return ok({ type: 'turn.approval', turnId: t.id, waiting: cmd.waiting, ...(cmd.waiting && cmd.sharing ? { sharing: true } : {}) });
     }
     case 'runner.text': {
       const t = s.turns[cmd.turnId];

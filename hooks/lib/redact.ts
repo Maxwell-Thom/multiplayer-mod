@@ -19,7 +19,11 @@ export function canSeeTurn(s: SpaceState, memberId: MemberId, t: Turn | undefine
   return true;
 }
 
-export function redactState(s: SpaceState, memberId: MemberId): SpaceState {
+export function redactState(full: SpaceState, memberId: MemberId): SpaceState {
+  // What someone shares from their own world is theirs to see.
+  const s: SpaceState = full.sharing && Object.keys(full.sharing).some((k) => k !== memberId)
+    ? { ...full, sharing: full.sharing[memberId] ? { [memberId]: full.sharing[memberId] } : {} }
+    : full;
   const hiddenBranches = new Set(Object.values(s.branches).filter((b) => !canSee(s, memberId, b.id)).map((b) => b.id));
   const hiddenTurns = new Set(Object.values(s.turns).filter((t) => !canSeeTurn(s, memberId, t)).map((t) => t.id));
   if (!hiddenBranches.size && !hiddenTurns.size) return s;
@@ -96,6 +100,7 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
     case 'turn.failed':
     case 'turn.stopped':
       return turnAudience(e.turnId);
+    case 'sharing.changed': return [e.memberId];
     case 'handoff.offered': return branchAudience(e.handoff.branchId);
     case 'handoff.updated': return branchAudience((after.handoffs[e.handoffId] ?? before.handoffs[e.handoffId])?.branchId);
     case 'ask.created': return branchAudience(e.ask.branchId);

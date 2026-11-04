@@ -6,6 +6,8 @@ export type Command =
   // members and the space
   | { type: 'member.rename'; name: string }
   | { type: 'member.notify'; notify: Member['notify'] }
+  /** Share a private source with this space, or stop (`source: '*'` with `on: false` stops everything). */
+  | { type: 'sharing.set'; source: string; name: string; on: boolean }
   | { type: 'member.role'; memberId: MemberId; role: Role }
   | { type: 'member.leave'; handTo?: MemberId; end?: boolean }
   | { type: 'member.remove'; memberId: MemberId }
@@ -59,7 +61,8 @@ export type Command =
   | { type: 'runner.check'; turnId: Id; conflict: NonNullable<Turn['conflict']> }
   | { type: 'runner.start'; turnId: Id; model?: string }
   | { type: 'runner.step'; turnId: Id; step: Step }
-  | { type: 'runner.approval'; turnId: Id; waiting: boolean }
+  /** `sharing`: what it waits on is its runner deciding whether to share something private (docs/PRIVACY.md). */
+  | { type: 'runner.approval'; turnId: Id; waiting: boolean; sharing?: boolean }
   | { type: 'runner.text'; turnId: Id; text: string }
   /** `thinking`: what Claude thought before it answered, as Claude Code shows it. */
   | { type: 'runner.done'; turnId: Id; text: string; usage?: Usage; model?: string; replies?: string[]; thinking?: string }

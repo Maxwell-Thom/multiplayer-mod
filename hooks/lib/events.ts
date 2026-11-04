@@ -11,6 +11,8 @@ export type EventBody =
   | { type: 'space.created'; space: Space; host: Member }
   | { type: 'member.joined'; member: Member }
   | { type: 'member.updated'; memberId: MemberId; patch: Partial<Pick<Member, 'name' | 'role' | 'notify' | 'limit'>> }
+  /** Seen only by that member. */
+  | { type: 'sharing.changed'; memberId: MemberId; source: string; name: string; on: boolean }
   | { type: 'member.left'; memberId: MemberId }
   | { type: 'space.policy'; policy: Policy }
   | { type: 'space.host'; hostId: MemberId }
@@ -31,7 +33,7 @@ export type EventBody =
   | { type: 'turn.cancelled'; turnId: Id; by: MemberId; restore: Part[] }
   | { type: 'turn.started'; turnId: Id; runnerId: MemberId; model?: string }
   | { type: 'turn.step'; turnId: Id; step: Step }
-  | { type: 'turn.approval'; turnId: Id; waiting: boolean }
+  | { type: 'turn.approval'; turnId: Id; waiting: boolean; sharing?: boolean }
   | { type: 'turn.paused'; turnId: Id }
   | { type: 'turn.resumed'; turnId: Id }
   | { type: 'turn.takeover'; turnId: Id; runnerId: MemberId }
@@ -70,7 +72,7 @@ export type LiveMessage =
   | { kind: 'delta'; turnId: Id; text: string }
   /** Sent to the member whose runner asks (the full request, for approving in the web app); a shared one also to everyone who may answer it. */
   /** `shared`: Claude's question or plan, which anyone here who may prompt can answer. */
-  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[]; plan?: string; shared?: boolean }
+  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[]; plan?: string; shared?: boolean; sharing?: { source: string; name: string; label: string } }
   /** `by`: who answered a shared one; `ok`: they approved or answered it. */
   | { kind: 'approval.cleared'; turnId: Id; requestId: string; by?: MemberId; ok?: boolean }
   /** Web app → its own runner, relayed through the server. */

@@ -170,6 +170,8 @@ export interface Turn {
   /** What Claude thought before it answered (shown folded; no session reads it back). */
   thinking?: string;
   status: TurnStatus;
+  /** Waiting on its runner to decide whether to share something private (not what). */
+  askingToShare?: boolean;
   requestedAt: number;
   startedAt?: number;
   endedAt?: number;
@@ -362,6 +364,11 @@ export interface SpaceState {
   pushes: FilesPush[];
   /** Last event seq each member has seen, for "since you left". */
   seen: Record<MemberId, number>;
+  /**
+   * What each person shares with this space from their own world (docs/PRIVACY.md), by source id
+   * (`connector:Gmail`, `outside`...). Each person sees only their own.
+   */
+  sharing?: Record<MemberId, Record<string, { name: string; at: number }>>;
 }
 
 /** Live, never stored: who is doing what right now. */

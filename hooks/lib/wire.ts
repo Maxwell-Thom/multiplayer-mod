@@ -89,7 +89,7 @@ export type RunnerInbound =
    * `shared`: Claude's question or its plan, which anyone here who may prompt can answer (it's about
    * the conversation, not the runner's computer). Everything else is the runner's alone.
    */
-  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[]; plan?: string; shared?: boolean }
+  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[]; plan?: string; shared?: boolean; sharing?: { source: string; name: string; label: string } }
   /** `by`: who answered a shared one; `ok`: they approved or answered it (else declined or skipped). */
   | { kind: 'approval.cleared'; turnId: Id; requestId: string; by?: MemberId; ok?: boolean }
   | { kind: 'files.request'; requestId: string; action: FilesAction }

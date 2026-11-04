@@ -26,6 +26,7 @@ import type { FilesAction, FilesReport, SpaceEvent } from './lib/events.ts'
 import { type AskQuestion, clip, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName } from './lib/helpers.ts'
 import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './transcript.ts'
 import { apply } from './lib/reduce.ts'
+import { privateSource, privateStepText } from './lib/privacy.ts'
 import type { Port } from './port.ts'
 import type { Branch, MemberId, Presence, RunnerInfo, SpaceState, Step, Turn, TurnFailure, TurnMode, Usage } from './lib/types.ts'
 import { BRIDGED_TOOLS, type CommandResponse, type RunnerHello, type RunnerInbound } from './lib/wire.ts'
@@ -250,7 +251,7 @@ export class Runner {
     await soft(() => io.registerCommand({
       name: 'multiplayer',
       description: 'Multiplayer: run your turns of a shared Claude conversation here',
-      argumentHint: 'start <space> | join <code> [name] | connect <pairing code> | status | open | pause | resume | allow | deny | stop | share <what> | post [text] | take-home | leave',
+      argumentHint: 'start <space> | join <code> [name] | connect <pairing code> | status | open | pause | resume | allow | deny | stop | sharing | unshare <name|all> | share <what> | post [text] | take-home | leave',
       immediate: true,
     }))
     // Paused too: connected, so the web app shows it paused and can resume it.
@@ -967,6 +968,8 @@ export class Runner {
     })]
     const env: Record<string, string> = {
       MULTIPLAYER_CHILD: personal ? 'private' : 'shared',
+      // A turn others read: its session checks what its person shares here before a private call.
+      ...(t.private ? {} : { MULTIPLAYER_SHARED_URL: `${normalizeServer(sess.server)}/mcp/turn/${sess.spaceId}/${token}/shared` }),
       // Questions wait for a person; sessions this mod starts keep their transcripts.
       MCP_TOOL_TIMEOUT: '900000',
       CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: '1',
@@ -1133,7 +1136,9 @@ export class Runner {
   private beginStep(a: Active, id: string, tool: string, input: Record<string, unknown>, parent?: string): void {
     if (this.active !== a || a.stopped) return
     const under = parent ? a.toolSteps.get(parent) : undefined
-    const step: Step = { i: a.steps++, tool, text: fmt.describeTool(tool, input, this.cwd, this.home), state: 'run', ...(under !== undefined ? { under } : {}) }
+    // Something private, in a turn others read: the line says what kind of source, nothing of the call.
+    const src = this.turn(a.turnId)?.private ? null : privateSource(tool, input, this.cwd)
+    const step: Step = { i: a.steps++, tool, text: src ? privateStepText(src) : fmt.describeTool(tool, input, this.cwd, this.home), state: 'run', ...(under !== undefined ? { under } : {}) }
     a.stepText.set(step.i, step)
     a.toolSteps.set(id, step.i)
     a.current.set(tool, step.i)
@@ -1184,7 +1189,9 @@ export class Runner {
     a.approvals.set(m.requestId, { requestId: m.requestId, tool: m.tool, title: m.title, always: m.always, questions: m.questions, i })
     const step = i === undefined ? undefined : a.stepText.get(i)
     if (step) void this.chainCmd(a, { type: 'runner.step', turnId: a.turnId, step: { ...step, state: 'wait' } })
-    this.io.toast(`Multiplayer: approval needed (${m.title.toLowerCase()}) for ${a.label}. Answer in the web app, or here with /multiplayer allow or /multiplayer deny.`)
+    this.io.toast(m.sharing
+      ? `Multiplayer: ${a.label} wants ${m.sharing.label}, and everyone in the space reads the answer. Share it? In the web app, or here: /multiplayer allow (once), allow always (for this space), deny.`
+      : `Multiplayer: approval needed (${m.title.toLowerCase()}) for ${a.label}. Answer in the web app, or here with /multiplayer allow or /multiplayer deny.`)
     this.refresh()
   }
 
@@ -1299,6 +1306,25 @@ export class Runner {
           if (!this.session) return { text: 'Not signed in to a space. ' + this.helpText() }
           io.log(`Multiplayer web link (keep it to yourself; it signs in as you): ${webLink(this.session)}`)
           return { text: `The web link for “${this.session.spaceName ?? 'your space'}” is shown above (it isn’t sent to Claude) and in the pane.`, openPane: true }
+        }
+        case 'sharing': {
+          if (!this.session || !this.state) return { text: 'Not signed in to a space. ' + this.helpText() }
+          const names = Object.values(this.state.sharing?.[this.me] ?? {}).map((x) => x.name)
+          return { text: names.length
+            ? `You share in “${this.state.space.name}”: ${names.join(', ')}. Stop with /multiplayer unshare <name>, or /multiplayer unshare all.`
+            : 'You share nothing of your own in this space. When a shared turn wants something private (your Gmail, a file outside the project), you’re asked first.' }
+        }
+        case 'unshare': {
+          if (!this.session || !this.state || !this.wire) return { text: 'Not signed in to a space. ' + this.helpText() }
+          const want = rest.join(' ').trim().toLowerCase()
+          const mine = this.state.sharing?.[this.me] ?? {}
+          if (!want) return { text: 'Which one? /multiplayer unshare <name>, or all. /multiplayer sharing lists them.' }
+          const hit = want === 'all' ? ['*', ''] as const : Object.entries(mine).map(([id, x]) => [id, x.name] as const).find(([id, n]) => n.toLowerCase() === want || id.toLowerCase() === want)
+          if (!hit) return { text: `You don’t share “${rest.join(' ')}” here. /multiplayer sharing lists what you do.` }
+          if (want === 'all' && !Object.keys(mine).length) return { text: 'You share nothing of your own in this space.' }
+          const r = await this.wire.command({ type: 'sharing.set', source: hit[0], name: hit[1], on: false })
+          if (!r.ok) return { text: `Couldn’t stop sharing: ${r.error ?? 'try again'}.` }
+          return { text: want === 'all' ? 'Stopped sharing everything of yours here. Shared turns ask again first.' : `Stopped sharing ${hit[1]} here. Shared turns ask again first.` }
         }
         case 'pause': {
           this.paused = true
@@ -1419,6 +1445,7 @@ export class Runner {
       '  /multiplayer connect <pairing code>                  sign in as yourself after joining in the browser',
       '  /multiplayer login | logout                          sign this Claude Code in to your account (invite-only servers)',
       '  /multiplayer import [session id]                     bring this Claude Code conversation (or another here) into a space',
+      '  /multiplayer sharing | unshare <name|all>             what of yours this space may read (your Gmail, files outside the project)',
       '  /multiplayer status | open | pause | resume | allow | deny | stop | share <what> | post [text] | take-home | leave',
       `Server: ${normalizeServer(this.opts.server)} (change it in /config, Multiplayer › Server URL)${this.account ? ` · signed in${this.account.email ? ` as ${this.account.email}` : ''}` : ''}.`,
       ...(web ? [`Help, setup and updates: ${web.replace(/\/+$/, '')}/help`] : []),
