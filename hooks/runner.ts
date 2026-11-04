@@ -253,7 +253,8 @@ export class Runner {
       argumentHint: 'start <space> | join <code> [name] | connect <pairing code> | status | open | pause | resume | allow | deny | stop | share <what> | post [text] | take-home | leave',
       immediate: true,
     }))
-    if (this.session && !this.paused && interactive) {
+    // Paused too: connected, so the web app shows it paused and can resume it.
+    if (this.session && interactive) {
       if (known) this.connect()
       else void this.connectUnlessElsewhere()
     }
@@ -345,12 +346,8 @@ export class Runner {
   private async loop(gen: number): Promise<void> {
     let backoff = 1000
     let needHello = true
+    // Paused, it keeps polling and picks nothing up (pickUp checks), so Resume in the web app reaches it.
     while (gen === this.gen) {
-      if (this.paused && !this.active && !this.queue.length) {
-        this.phase = 'off'
-        this.refresh()
-        return
-      }
       const startedAt = Date.now()
       try {
         if (needHello || !this.state) {
@@ -1314,6 +1311,12 @@ export class Runner {
           this.paused = false
           await soft(() => io.storeSet(STORE_PAUSED, false))
           if (!this.session) return { text: 'Not signed in to a space. ' + this.helpText() }
+          if (this.phase === 'online') {
+            await soft(() => this.hello())
+            this.pickUp()
+            this.refresh()
+            return { text: 'Resumed: picking up your turns here.' }
+          }
           if ((await this.takeOver()) === 'after') return { text: 'Your other Claude Code is in the middle of a turn of yours. It finishes there, then your turns run here.' }
           return { text: 'Resumed: picking up your turns here.' }
         }
