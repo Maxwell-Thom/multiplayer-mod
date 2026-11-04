@@ -218,6 +218,130 @@ export function combinePrompt(hunks: Hunk[]): string {
   ].join('\n')
 }
 
+// ------------------------------------------------- what a turn changed
+
+/** The folder as a shared turn starts: what was already changed stays its person's. */
+export type WorkStart = { root: string; head: string | null; upstream: string | null; email: string; dirty: Map<string, string> }
+
+/** What a turn left: files it changed and left uncommitted, the commits it made, where they're pushed. */
+export type WorkEnd = { uncommitted: string[]; commits: { sha: string; subject: string }[]; pushed?: string }
+
+/** `git status` as path → status letters (porcelain v1, -z: "XY path", a rename's old path next). */
+async function statusMap(sh: Shell, root: string, paths?: string[]): Promise<Map<string, string>> {
+  const r = await git(sh, ['-C', root, 'status', '--porcelain=v1', '-z', '--untracked-files=all', ...(paths?.length ? ['--', ...paths] : [])])
+  const out = new Map<string, string>()
+  if (r.code !== 0) return out
+  const items = r.out.split('\0')
+  for (let i = 0; i < items.length; i++) {
+    const e = items[i]
+    if (e.length < 4) continue
+    const xy = e.slice(0, 2)
+    out.set(e.slice(3), xy)
+    if (xy[0] === 'R' || xy[0] === 'C') i++
+  }
+  return out
+}
+
+/** Each changed path's content as git hashes it (a deleted one: its status), to tell later edits apart. */
+async function signatures(sh: Shell, root: string, st: Map<string, string>, only?: Set<string>): Promise<Map<string, string>> {
+  const sig = new Map<string, string>()
+  const toHash: string[] = []
+  for (const [p, xy] of st) {
+    if (only && !only.has(p)) continue
+    if (xy.includes('D')) sig.set(p, `D${xy}`)
+    else toHash.push(p)
+  }
+  for (let i = 0; i < Math.min(toHash.length, 600); i += 100) {
+    const chunk = toHash.slice(i, i + 100)
+    const r = await git(sh, ['-C', root, 'hash-object', '--', ...chunk]).catch(() => null)
+    const hashes = r && r.code === 0 ? r.out.trim().split('\n') : []
+    chunk.forEach((p, k) => sig.set(p, hashes.length === chunk.length ? hashes[k] : `?${st.get(p)}`))
+  }
+  for (const p of toHash.slice(600)) sig.set(p, `?${st.get(p)}`)
+  return sig
+}
+
+/** Before a shared turn: null outside a git repository. */
+export async function workStart(sh: Shell): Promise<WorkStart | null> {
+  const root = await repoRoot(sh)
+  if (!root) return null
+  const st = await statusMap(sh, root)
+  return {
+    root,
+    head: await head(sh),
+    upstream: await gitOk(sh, ['rev-parse', '@{u}']),
+    email: (await gitOk(sh, ['config', 'user.email'])) ?? '',
+    dirty: await signatures(sh, root, st),
+  }
+}
+
+/** Where a commit is on the remote: the branch name without its remote ("main"), else undefined. */
+async function pushedTo(sh: Shell, root: string, sha: string): Promise<string | undefined> {
+  const r = await gitOk(sh, ['-C', root, 'branch', '-r', '--contains', sha, '--format=%(refname:short)'])
+  const refs = (r ?? '').split('\n').map((x) => x.trim()).filter((x) => x && !x.endsWith('/HEAD'))
+  const upstream = await gitOk(sh, ['-C', root, 'rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'])
+  const ref = refs.find((x) => x === upstream) ?? refs[0]
+  return ref ? ref.replace(/^[^/]+\//, '') : undefined
+}
+
+const shared = (p: string) => !p.startsWith('.multiplayer/')
+
+/** After a shared turn: what it changed, against what was there when it started. */
+export async function workEnd(sh: Shell, start: WorkStart): Promise<WorkEnd> {
+  const root = start.root
+  const st = await statusMap(sh, root)
+  const again = await signatures(sh, root, st, new Set([...st.keys()].filter((p) => start.dirty.has(p))))
+  const uncommitted = [...st.keys()].filter((p) => shared(p) && (!start.dirty.has(p) || again.get(p) !== start.dirty.get(p))).sort()
+  let commits: WorkEnd['commits'] = []
+  const now = await head(sh)
+  if (now && now !== start.head) {
+    // Only the turn's own commits: not ones pulled in during it (on the remote before, or someone else's).
+    const log = (await gitOk(sh, ['-C', root, 'log', `--format=%H${SEP}%s${SEP}%ae`, '--max-count=50', 'HEAD', ...(start.head ? [`^${start.head}`] : []), ...(start.upstream ? [`^${start.upstream}`] : [])])) ?? ''
+    commits = log.split('\n').filter(Boolean).map((l) => l.split(SEP))
+      .filter(([, , ae]) => !start.email || !ae || ae.toLowerCase() === start.email.toLowerCase())
+      .map(([sha = '', subject = '']) => ({ sha: sha.slice(0, 12), subject }))
+  }
+  const pushed = commits.length ? await pushedTo(sh, root, commits[0].sha) : undefined
+  return { uncommitted, commits, ...(pushed ? { pushed } : {}) }
+}
+
+/**
+ * Later: a turn's uncommitted files since committed (their commits join the turn's) or put
+ * back, and whether its commits have been pushed. Null outside a repository.
+ */
+export async function workRecheck(sh: Shell, w: { files: string[]; commits: { sha: string; subject: string }[]; pushed?: string; at: number }): Promise<WorkEnd | null> {
+  const root = await repoRoot(sh)
+  if (!root) return null
+  let files = w.files
+  let commits = w.commits
+  if (files.length) {
+    const st = await statusMap(sh, root, files)
+    const gone = files.filter((p) => !st.has(p))
+    files = files.filter((p) => st.has(p))
+    if (gone.length) {
+      const email = ((await gitOk(sh, ['config', 'user.email'])) ?? '').toLowerCase()
+      const log = (await gitOk(sh, ['-C', root, 'log', `--format=%H${SEP}%s${SEP}%ae`, '--max-count=20', `--since=${new Date(w.at - 60_000).toISOString()}`, 'HEAD', '--', ...gone])) ?? ''
+      const later = log.split('\n').filter(Boolean).map((l) => l.split(SEP))
+        .filter(([, , ae]) => !email || !ae || ae.toLowerCase() === email)
+        .map(([sha = '', subject = '']) => ({ sha: sha.slice(0, 12), subject }))
+        .filter((c) => !commits.some((x) => x.sha === c.sha))
+      commits = [...later, ...commits]
+    }
+  }
+  const pushed = commits.length ? (await pushedTo(sh, root, commits[0].sha)) : undefined
+  return { uncommitted: files, commits, ...(pushed ? { pushed } : {}) }
+}
+
+/** Which of these commits this folder's checkout has (12-character shas), among commits since `since`. */
+export async function commitsHere(sh: Shell, shas: string[], since: number): Promise<string[]> {
+  if (!shas.length) return []
+  const root = await repoRoot(sh)
+  if (!root) return []
+  const out = (await gitOk(sh, ['-C', root, 'rev-list', `--since=${new Date(since - 7 * 86_400_000).toISOString()}`, '--max-count=20000', 'HEAD'], 30_000)) ?? ''
+  const have = new Set(out.split('\n').map((x) => x.trim().slice(0, 12)).filter(Boolean))
+  return shas.filter((s) => have.has(s.slice(0, 12)))
+}
+
 /** After a shared turn: the commits it made, when they are all on the upstream branch. */
 export async function pushedSince(sh: Shell, startHead: string | null): Promise<{ branch: string; commits: { sha: string; subject: string }[] } | null> {
   if (!startHead) return null

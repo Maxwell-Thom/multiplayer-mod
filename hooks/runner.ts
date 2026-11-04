@@ -21,15 +21,15 @@ import {
 import * as fmt from './format.ts'
 import * as G from './git.ts'
 import type { Command } from './lib/commands.ts'
-import { buildSessionTurn, parseReplies } from './lib/context.ts'
+import { type FolderView, buildSessionTurn, parseReplies } from './lib/context.ts'
 import type { FilesAction, FilesReport, SpaceEvent } from './lib/events.ts'
 import { type AskQuestion, clip, fileType, fmtSize, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName } from './lib/helpers.ts'
 import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './transcript.ts'
 import { apply } from './lib/reduce.ts'
-import { privateSource, privateStepText } from './lib/privacy.ts'
+import { insideFolder, privateSource, privateStepText } from './lib/privacy.ts'
 import type { Port } from './port.ts'
-import type { Branch, MemberId, Presence, RunnerInfo, SpaceState, Step, Turn, TurnFailure, TurnMode, Usage } from './lib/types.ts'
-import { FILE_MAX_BYTES } from './lib/types.ts'
+import type { Branch, MemberId, Presence, RunnerInfo, SpaceState, Step, Turn, TurnFailure, TurnMode, TurnWork, Usage } from './lib/types.ts'
+import { FILE_MAX_BYTES, WORK_COMMITS_MAX, WORK_FILES_MAX } from './lib/types.ts'
 import { BRIDGED_TOOLS, type CommandResponse, type RunnerHello, type RunnerInbound } from './lib/wire.ts'
 
 export const PLUGIN = 'multiplayer'
@@ -107,9 +107,34 @@ export type Active = {
   /** Ends the branch session's process (a stop, a take-over). */
   kill: (() => void) | null
   startHead: string | null
+  /** The folder as the turn started (null: not a git repository; undefined: couldn't tell). */
+  work0: G.WorkStart | null | undefined
+  /** Files Claude's edit steps named. */
+  touched: Set<string>
   chain: Promise<unknown>
   approvals: Map<string, Pending>
 }
+
+/**
+ * A shared turn's changes in this folder that aren't all pushed yet. The runner checks them
+ * again now and then, and tells the space when they're committed or pushed. `sent`: the last
+ * report the space has.
+ */
+type WorkEntry = {
+  turnId: string
+  spaceId: string
+  at: number
+  files: string[]
+  commits: { sha: string; subject: string }[]
+  pushed?: string
+  noRepo?: boolean
+  sent: string
+}
+
+/** Each folder's WorkEntry list, by folder. */
+const STORE_WORK = 'work'
+const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+const workPending = (e: WorkEntry) => !!e.noRepo || e.files.length > 0 || (e.commits.length > 0 && !e.pushed)
 
 type Job =
   | { kind: 'shared'; turnId: string; noticed?: boolean }
@@ -371,6 +396,8 @@ export class Runner {
         }
         backoff = 1000
         void this.refreshPeople()
+        // A push from a terminal, outside any turn: noticed within a few minutes.
+        if (!this.active) void this.recheckWork(false)
       } catch (err) {
         if (gen !== this.gen) return
         const status = err instanceof HttpError ? err.status : 0
@@ -915,8 +942,127 @@ export class Runner {
       turnId, branchId, label: 'a shared turn', mode: 'normal', parts: 0, private: false, model: '',
       live: '', steps: 0, stepText: new Map(), toolSteps: new Map(), current: new Map(), lastDelta: 0, deltaTimer: null,
       stopped: null, wire, spaceId, exited: false, finished, settle,
-      kill: null, startHead: null, chain: Promise.resolve(), approvals: new Map(),
+      kill: null, startHead: null, work0: undefined, touched: new Set(), chain: Promise.resolve(), approvals: new Map(),
     }
+  }
+
+  // ===================================================== where the code is
+
+  /** This folder, as the key its WorkEntry list is kept under. */
+  private folderKey(): string {
+    const c = this.cwd.replace(/\\/g, '/').replace(/\/+$/, '')
+    return /^[a-z]:/i.test(c) ? c.toLowerCase() : c
+  }
+
+  private async workEntries(): Promise<WorkEntry[]> {
+    const all = await soft(() => this.io.storeGet(STORE_WORK))
+    const list = all && typeof all === 'object' ? (all as Record<string, unknown>)[this.folderKey()] : undefined
+    return Array.isArray(list) ? (list as WorkEntry[]) : []
+  }
+
+  private async saveWork(list: WorkEntry[]): Promise<void> {
+    const all = ((await soft(() => this.io.storeGet(STORE_WORK))) ?? {}) as Record<string, WorkEntry[]>
+    const key = this.folderKey()
+    // This folder first, newest entries kept; at most 20 folders.
+    const next: Record<string, WorkEntry[]> = list.length ? { [key]: list.slice(-100) } : {}
+    for (const [k, v] of Object.entries(typeof all === 'object' ? all : {}).filter(([k]) => k !== key).slice(0, 19)) next[k] = v
+    await soft(() => this.io.storeSet(STORE_WORK, next))
+  }
+
+  /** What the space hears of a turn's changes: a private file (a key, a .env) is counted, never named. */
+  private workReport(e: WorkEntry): Omit<TurnWork, 'at'> {
+    const named: string[] = []
+    let more = 0
+    for (const f of e.files) {
+      // Named only where reading it would be: not a secret (a key, a .env), not outside the folder.
+      if (named.length >= WORK_FILES_MAX || f.length > 300 || privateSource('Read', { file_path: f }, this.cwd)) more++
+      else named.push(f)
+    }
+    const commits = e.commits.slice(0, WORK_COMMITS_MAX).map((c) => ({ sha: c.sha.slice(0, 12), subject: c.subject.slice(0, 300) }))
+    return {
+      ...(e.noRepo ? { noRepo: true } : {}),
+      ...(named.length ? { uncommitted: named } : {}),
+      ...(more ? { more } : {}),
+      ...(commits.length ? { commits } : {}),
+      ...(e.pushed && commits.length ? { pushed: e.pushed.slice(0, 200) } : {}),
+    }
+  }
+
+  /** At a shared turn's end: tell the space what it changed here, and keep it to check again. */
+  private async recordWork(a: Active, w: Wire): Promise<void> {
+    const start = a.work0
+    if (start === undefined) return
+    let e: WorkEntry
+    if (start === null) {
+      // Not a git repository: the files Claude's steps edited, inside this folder.
+      const files = [...new Set([...a.touched].filter((p) => insideFolder(p, this.cwd)).map((p) => fmt.sharePath(p, this.cwd)))]
+      if (!files.length) return
+      e = { turnId: a.turnId, spaceId: a.spaceId, at: Date.now(), files, commits: [], noRepo: true, sent: '' }
+    } else {
+      const end = await soft(() => G.workEnd(this.io, start))
+      if (!end) return
+      e = { turnId: a.turnId, spaceId: a.spaceId, at: Date.now(), files: end.uncommitted, commits: end.commits, ...(end.pushed ? { pushed: end.pushed } : {}), sent: '' }
+    }
+    const report = this.workReport(e)
+    if (!report.noRepo && !report.uncommitted && !report.more && !report.commits) return
+    const r = await soft(() => w.command({ type: 'runner.work', turnId: a.turnId, work: report }))
+    if (r?.ok) e.sent = JSON.stringify(report)
+    if (workPending(e) || !e.sent) await this.saveWork([...(await this.workEntries()).filter((x) => x.turnId !== e.turnId), e])
+  }
+
+  private lastWorkCheck = 0
+  private checkingWork = false
+
+  /**
+   * Checks this folder's pending changes again (committed since? pushed?) and tells the space
+   * what changed. `force`: now; otherwise at most every three minutes.
+   */
+  async recheckWork(force: boolean): Promise<void> {
+    const w = this.wire
+    const spaceId = this.session?.spaceId
+    if (!w || !spaceId || this.checkingWork || (!force && Date.now() - this.lastWorkCheck < 180_000)) return
+    this.checkingWork = true
+    this.lastWorkCheck = Date.now()
+    try {
+      const all = await this.workEntries()
+      if (!all.length) return
+      const keep: WorkEntry[] = []
+      for (const e of all) {
+        // Another space's: checked when this Claude Code is in that space again.
+        if (e.spaceId !== spaceId) { keep.push(e); continue }
+        // Its turn is gone from the space (or taken over): nothing to tell.
+        const t = this.state?.turns[e.turnId]
+        if (this.state && (!t || t.runnerId !== this.me)) continue
+        if (!e.noRepo) {
+          const r = await soft(() => G.workRecheck(this.io, e))
+          if (r) { e.files = r.uncommitted; e.commits = r.commits; if (r.pushed) e.pushed = r.pushed; else delete e.pushed }
+        }
+        const report = this.workReport(e)
+        const said = JSON.stringify(report)
+        if (said !== e.sent) {
+          const r = await soft(() => w.command({ type: 'runner.work', turnId: e.turnId, work: report }))
+          if (r?.ok) e.sent = said
+          else if (r && !r.ok) continue
+        }
+        if (workPending(e) || e.sent !== said) keep.push(e)
+      }
+      await this.saveWork(keep)
+    } finally {
+      this.checkingWork = false
+    }
+  }
+
+  /** What this folder holds, for "Where the code is". */
+  private async folderView(s: SpaceState, branchId: string, noRepo: boolean): Promise<FolderView> {
+    const spaceId = this.session?.spaceId
+    const here = (await this.workEntries()).filter((e) => e.spaceId === spaceId).map((e) => e.turnId)
+    if (noRepo) return { here, has: [], noRepo: true }
+    // The newest commit each earlier turn names, looked for in this checkout.
+    const named = historyTurns(s, branchId).filter((t) => t.work?.commits?.length && !here.includes(t.id))
+    const shas = [...new Set(named.map((t) => t.work!.commits![0].sha))].slice(-40)
+    const since = Math.min(Date.now(), ...named.map((t) => t.startedAt ?? t.requestedAt))
+    const has = shas.length ? (await soft(() => G.commitsHere(this.io, shas, since))) ?? [] : []
+    return { here, has }
   }
 
   // ======================================================= branch sessions
@@ -1005,6 +1151,11 @@ export class Runner {
     this.lastBranchId = t.branchId
     await this.saveMemo()
     a.startHead = (await soft(() => G.head(io))) ?? null
+    // What the folder holds before Claude starts, so only this turn's changes are reported.
+    a.work0 = await soft(() => G.workStart(io))
+    // Earlier turns' changes here, checked again (pushed since?), and what this folder has of others'.
+    await this.recheckWork(true)
+    const folder = await this.folderView(s, t.branchId, a.work0 === null)
 
     // A recap is a one-off private session. A side question (Claude Code's /btw, for a branch) runs
     // in a throwaway fork of the asker's session of the branch: the same instructions and tools, so it
@@ -1013,7 +1164,7 @@ export class Runner {
     const aside = t.mode === 'aside'
     let { plan, held } = t.mode === 'recap' ? { plan: { kind: 'new', id: newSessionId() } as SessionPlan, held: { id: '', through: null, at: {} } as BranchSession } : this.sessionPlan(s, branch, await this.branchSessions(), sess.spaceId)
     if (aside && plan.kind === 'resume') plan = { kind: 'fork', from: plan.id }
-    const st = buildSessionTurn(s, t, { heldThrough: held.through, lastState: held.state })
+    const st = buildSessionTurn(s, t, { heldThrough: held.through, lastState: held.state, folder })
     const conv = s.conversations[branch.conversationId]
     const name = `Multiplayer · ${s.space.name} · ${isMain(s, branch.id) ? conv?.title ?? 'Main' : branch.name}`
     // A private lane or recap is the person's own: their own setup, whatever the space says. A side
@@ -1118,6 +1269,8 @@ export class Runner {
         await this.finishCommand({ type: 'runner.fail', turnId: a.turnId, failure }, w)
         if (failure.reason === 'limit') io.toast(`Multiplayer: limit reached while running ${a.label}${failure.resetsAt ? `; it resets ${when(failure.resetsAt)}` : ''}.`)
       }
+      // Stopped, failed or done: whatever it changed in this folder is there, so say so.
+      await this.recordWork(a, w)
       await this.reportPush(a)
     } finally {
       this.ending.delete(a)
@@ -1168,6 +1321,8 @@ export class Runner {
   async onTurnComplete(e: TurnCompleteInput): Promise<void> {
     if (this.combine && this.combine.ccTurnId === e.turnId) await this.finishCombine()
     else this.busy = false
+    // The person may have committed or pushed shared turns' changes in their own turn.
+    void this.recheckWork(true)
     const sh = this.share
     if (sh && sh.ccTurnId === e.turnId) {
       sh.draft = e.isAborted ? undefined : e.answer.trim() || undefined
@@ -1209,6 +1364,9 @@ export class Runner {
     // Something private, in a turn others read: the line says what kind of source, nothing of the call.
     const src = this.turn(a.turnId)?.private ? null : privateSource(tool, input, this.cwd)
     const step: Step = { i: a.steps++, tool, text: src ? privateStepText(src) : fmt.describeTool(tool, input, this.cwd, this.home), state: 'run', ...(under !== undefined ? { under } : {}) }
+    // The files Claude edits, for a folder git can't tell about.
+    const path = EDIT_TOOLS.has(tool) ? (typeof input.file_path === 'string' ? input.file_path : typeof input.notebook_path === 'string' ? input.notebook_path : '') : ''
+    if (path && a.touched.size < 200) a.touched.add(path)
     a.stepText.set(step.i, step)
     a.toolSteps.set(id, step.i)
     a.current.set(tool, step.i)

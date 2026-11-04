@@ -253,7 +253,34 @@ export interface Turn {
   private?: boolean;
   /** Brought in from a conversation someone had elsewhere: done there, not run here. */
   imported?: ImportSource;
+  /** What it changed in its runner's folder, and whether that's been pushed (its runner keeps it current). */
+  work?: TurnWork;
 }
+
+/**
+ * The file changes a turn made, as its runner last saw them in its own folder. Only changes the
+ * turn made: whatever else that folder holds stays its person's. Others can't see that folder,
+ * so this is how their Claude knows what it has and what it doesn't (docs/CONTEXT.md).
+ */
+export interface TurnWork {
+  /** Its folder isn't a git repository, so nobody else can pull its changes. */
+  noRepo?: boolean;
+  /** Files it changed that are still uncommitted, relative to the repository (the first few). */
+  uncommitted?: string[];
+  /** More uncommitted files than listed, or ones not named because they're private. */
+  more?: number;
+  /** Commits holding its changes: made in the turn, or later commits of its files. Newest first. */
+  commits?: { sha: string; subject: string }[];
+  /** Once those commits are on the remote: the branch they're on. */
+  pushed?: string;
+  /** When its runner last checked. */
+  at: number;
+}
+
+/** Most files a turn's work names; the rest count in `more`. */
+export const WORK_FILES_MAX = 20;
+/** Most commits a turn's work lists. */
+export const WORK_COMMITS_MAX = 30;
 
 /** Where a conversation brought into a space came from. */
 export interface ImportSource {

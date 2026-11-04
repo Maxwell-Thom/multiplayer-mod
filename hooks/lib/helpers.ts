@@ -1,5 +1,5 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import type { Branch, Decision, Id, ImportTurn, MemberId, Note, Question, SpaceState, Turn } from './types.ts';
+import type { Branch, Decision, Id, ImportTurn, MemberId, Note, Question, SpaceState, Turn, TurnWork } from './types.ts';
 
 export const ACTIVE_STATUSES: Turn['status'][] = ['requested', 'held', 'conflict', 'running', 'approval', 'paused'];
 
@@ -151,6 +151,40 @@ export function modelLabel(name: string | undefined): string {
   const fam = n.includes('opus') ? 'Opus' : n.includes('sonnet') ? 'Sonnet' : n.includes('haiku') ? 'Haiku' : name;
   const m = n.match(/(\d+)[-.](\d+)/);
   return m && fam !== name ? `${fam} ${m[1]}.${m[2]}` : fam;
+}
+
+/** Where a turn's file changes stand, from its work record. */
+export type WorkStatus = 'none' | 'no-repo' | 'uncommitted' | 'unpushed' | 'pushed';
+
+export function workStatus(w: TurnWork | undefined): WorkStatus {
+  if (!w) return 'none';
+  if (w.noRepo) return 'no-repo';
+  if (w.uncommitted?.length || w.more) return 'uncommitted';
+  if (w.commits?.length) return w.pushed ? 'pushed' : 'unpushed';
+  return 'none';
+}
+
+const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+/** The files a turn's work names: "src/a.ts, src/b.ts and 3 more". */
+export function workFiles(w: TurnWork, max = 3): string {
+  const named = w.uncommitted ?? [];
+  const extra = Math.max(0, named.length - max) + (w.more ?? 0);
+  return [named.slice(0, max).join(', '), extra ? `${extra} more` : ''].filter(Boolean).join(' and ');
+}
+
+/** One short line on where a turn's changes are, for people ("your computer" for its runner). */
+export function workLine(s: SpaceState, t: Turn, viewer?: MemberId): string {
+  const w = t.work;
+  const st = workStatus(w);
+  if (!w || st === 'none') return '';
+  const whose = viewer === t.runnerId ? 'your computer' : `${memberName(s, t.runnerId)}’s computer`;
+  const n = (w.uncommitted?.length ?? 0) + (w.more ?? 0);
+  const c = w.commits?.length ?? 0;
+  if (st === 'no-repo') return `Changed ${n ? count(n, 'file') : 'files'} on ${whose}, outside git: others can’t pull them`;
+  if (st === 'uncommitted') return `${count(n, 'file')} changed on ${whose}, not committed${c ? ` · ${count(c, 'commit')} ${w.pushed ? `pushed to ${w.pushed}` : 'not pushed'}` : ''}`;
+  if (st === 'unpushed') return `${count(c, 'commit')} on ${whose}, not pushed`;
+  return `${count(c, 'commit')} pushed to ${w.pushed}`;
 }
 
 export function clip(text: string, n: number): string {

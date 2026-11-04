@@ -749,6 +749,24 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!text) return fail('Empty question.');
       return ok({ type: 'question.added', question: { id: nextQuestionId(s), text: clip(text, 300), by: 'claude', at: ctx.now, branchId: isMain(s, t.branchId) ? null : t.branchId, conversationId: t.conversationId }, branchId: t.branchId });
     }
+    case 'runner.work': {
+      // Only the turn's own runner knows its folder; it may say so after the turn ends too.
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor || t.imported) return fail('Not your turn.', 'forbidden');
+      if (!t.startedAt) return fail('That turn never ran.', 'state');
+      const w = cmd.work;
+      const work = {
+        ...(w.noRepo ? { noRepo: true } : {}),
+        ...(w.uncommitted?.length ? { uncommitted: w.uncommitted } : {}),
+        ...(w.more ? { more: w.more } : {}),
+        ...(w.commits?.length ? { commits: w.commits } : {}),
+        ...(w.pushed && w.commits?.length ? { pushed: w.pushed } : {}),
+        at: ctx.now,
+      };
+      // Nothing changed and nothing was there before: no event.
+      if (!t.work && !work.noRepo && !work.uncommitted && !work.more && !work.commits) return ok();
+      return ok({ type: 'turn.work', turnId: t.id, work });
+    }
     case 'runner.pushed': {
       const deny = needWrite(); if (deny) return deny;
       const p = cmd.push;

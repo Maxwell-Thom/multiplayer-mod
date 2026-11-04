@@ -225,6 +225,8 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'turn.stopped':
       s = patchTurn(s, e.turnId, { status: 'stopped', stoppedBy: e.by, endedAt: e.at });
       return releaseLease(s, e.turnId);
+    case 'turn.work':
+      return patchTurn(s, e.turnId, { work: e.work });
     case 'handoff.offered':
       s.handoffs = { ...s.handoffs, [e.handoff.id]: e.handoff };
       return s;

@@ -1,6 +1,7 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
 import type { Command } from './commands.ts';
 import { isModelName, isSite } from './helpers.ts';
+import { WORK_COMMITS_MAX, WORK_FILES_MAX } from './types.ts';
 
 /**
  * Shape checks for commands arriving from the network, before `decide` reads
@@ -72,6 +73,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'runner.decision': { turnId: 'id', text: 'str:2000', replaces: 'id?' },
   'runner.question': { turnId: 'id', text: 'str:2000' },
   'runner.pushed': { push: 'obj' },
+  'runner.work': { turnId: 'id', work: 'obj' },
   'server.pause': { turnId: 'id' },
   'server.resume': { turnId: 'id' },
   'server.note': { turnId: 'id', text: 'str:200000' },
@@ -135,6 +137,17 @@ export function invalid(cmd: unknown): string | null {
     if (typeof p.branch !== 'string' || p.branch.length > 200 || typeof p.summary !== 'string' || p.summary.length > 4000 || (p.branchId !== undefined && !isId(p.branchId))
       || !Array.isArray(p.commits) || !p.commits.length || p.commits.length > 200
       || !p.commits.every((x) => isObj(x) && typeof x.sha === 'string' && x.sha.length <= 64 && typeof x.subject === 'string' && x.subject.length <= 500)) return 'Bad push.';
+  }
+  if (cmd.type === 'runner.work') {
+    const w = c.work as Record<string, unknown>;
+    const known = ['noRepo', 'uncommitted', 'more', 'commits', 'pushed'];
+    if (Object.keys(w).some((k) => !known.includes(k))) return 'Bad work.';
+    if (w.noRepo !== undefined && typeof w.noRepo !== 'boolean') return 'Bad work.';
+    if (w.uncommitted !== undefined && (!Array.isArray(w.uncommitted) || w.uncommitted.length > WORK_FILES_MAX || !w.uncommitted.every((f) => typeof f === 'string' && f.length > 0 && f.length <= 300))) return 'Bad work.';
+    if (w.more !== undefined && (typeof w.more !== 'number' || !Number.isInteger(w.more) || w.more < 0 || w.more > 1_000_000)) return 'Bad work.';
+    if (w.commits !== undefined && (!Array.isArray(w.commits) || w.commits.length > WORK_COMMITS_MAX
+      || !w.commits.every((x) => isObj(x) && typeof x.sha === 'string' && /^[0-9a-f]{7,64}$/.test(x.sha) && typeof x.subject === 'string' && x.subject.length <= 300))) return 'Bad work.';
+    if (w.pushed !== undefined && (typeof w.pushed !== 'string' || !w.pushed || w.pushed.length > 200)) return 'Bad work.';
   }
   if (cmd.type === 'merge.complete' && !Object.values(c.picks as object).every((v) => typeof v === 'boolean')) return 'Bad picks.';
   // A pinned model goes to Claude Code's --model on the runner's machine.

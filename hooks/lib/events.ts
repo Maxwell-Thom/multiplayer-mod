@@ -2,7 +2,7 @@
 import type {
   Ask, Branch, ChatMessage, Conversation, Decision, FilesPush, Handoff, Member, MemberId, Merge,
   MergeChoice, ModelPin, Note, Part, Policy, Presence, Question, RunnerInfo, Space, Step, TimelineItem,
-  Schedule, SharedFile, Turn, TurnFailure, TurnMode, Usage, Id,
+  Schedule, SharedFile, Turn, TurnFailure, TurnMode, TurnWork, Usage, Id,
 } from './types.ts';
 import type { AskQuestion } from './helpers.ts';
 
@@ -44,6 +44,7 @@ export type EventBody =
   | { type: 'turn.done'; turnId: Id; text: string; usage?: Usage; model?: string; replies?: string[]; thinking?: string }
   | { type: 'turn.failed'; turnId: Id; failure: TurnFailure }
   | { type: 'turn.stopped'; turnId: Id; by: MemberId }
+  | { type: 'turn.work'; turnId: Id; work: TurnWork }
   | { type: 'handoff.offered'; handoff: Handoff }
   | { type: 'handoff.updated'; handoffId: Id; status: Handoff['status'] }
   | { type: 'ask.created'; ask: Ask }

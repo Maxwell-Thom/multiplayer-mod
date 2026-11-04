@@ -1,6 +1,114 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import { branchDecisions, branchQuestions, clip, historyTurns, isOneOff, memberName, mainOf, isMain, noteLine, turnsOf } from './helpers.ts';
-import type { Id, SpaceState, Turn } from './types.ts';
+import { branchDecisions, branchQuestions, clip, historyTurns, isOneOff, memberName, mainOf, isMain, noteLine, turnsOf, workFiles, workStatus } from './helpers.ts';
+import type { Id, MemberId, SpaceState, Turn } from './types.ts';
+
+/**
+ * What a runner knows about its own folder, for "Where the code is". Everyone's Claude works
+ * in their own copy, so this is how a session knows which changes from earlier turns it has.
+ */
+export interface FolderView {
+  /** Turns run in this folder whose changes aren't all pushed yet. */
+  here: Id[];
+  /** Commits this folder has (12-character shas), among those turns' work names. */
+  has: string[];
+  /** This folder isn't a git repository: it can't pull anyone's changes. */
+  noRepo?: boolean;
+}
+
+/** Who reads a turn, and from which folder (none: a claude.ai chat, which has no files). */
+type Reader = { runnerId: MemberId; folder?: FolderView };
+
+const sha12 = (sha: string) => sha.slice(0, 12);
+
+function turnLabel(s: SpaceState, t: Turn): string {
+  return `${memberName(s, t.senderId)}'s turn “${clip(t.parts[0]?.text ?? '', 60)}”`;
+}
+
+/** Where a turn's changes were made, as its reader sees it. */
+function madeWhere(s: SpaceState, t: Turn, r: Reader): string {
+  const who = memberName(s, t.runnerId);
+  if (!r.folder) return `on ${who}'s computer`;
+  if (r.folder.here.includes(t.id)) return 'in this folder';
+  return t.runnerId === r.runnerId ? `in another of ${who}'s folders (another computer or copy), not this one` : `on ${who}'s computer, not in this folder`;
+}
+
+/** The bracket under a turn that changed files: where, and what. */
+function workNote(s: SpaceState, t: Turn, r: Reader | undefined): string {
+  const w = t.work;
+  if (!w || !r || workStatus(w) === 'none') return '';
+  const what = [
+    w.uncommitted?.length || w.more ? workFiles(w, 8) : '',
+    w.commits?.length ? `${w.commits.length} commit${w.commits.length === 1 ? '' : 's'}` : '',
+  ].filter(Boolean).join('; ');
+  return `\n[Its file changes were made ${madeWhere(s, t, r)}${what ? ` (${what})` : ''}.]`;
+}
+
+/** Where one turn's changes stand now; `missing` when the reader's folder doesn't have them. */
+function standing(s: SpaceState, t: Turn, r: Reader): { text: string; missing: boolean } {
+  const w = t.work!;
+  const f = r.folder;
+  const here = !!f?.here.includes(t.id);
+  const who = memberName(s, t.runnerId);
+  const away = t.runnerId === r.runnerId ? `only in another of ${who}'s folders` : `only on ${who}'s computer`;
+  const newest = w.commits?.[0];
+  const commits = newest ? `${w.commits!.length === 1 ? 'commit' : `${w.commits!.length} commits, newest`} ${sha12(newest.sha)} “${clip(newest.subject, 80)}”` : '';
+  const pushedHas = () => !f ? '' : here || f.has.includes(sha12(newest!.sha)) ? '; this folder has it'
+    : f.noRepo ? `; this folder doesn't have it (it isn't a git repository, so it can't pull)` : `; this folder doesn't have it yet (a pull would bring it)`;
+  switch (workStatus(w)) {
+    case 'no-repo':
+      return here ? { text: `in this folder, which isn't a git repository`, missing: false }
+        : { text: `${f ? away : `on ${who}'s computer`}, in a folder that isn't a git repository, so nobody else can pull it`, missing: !!f };
+    case 'uncommitted': {
+      const rest = newest ? `; ${commits}, ${w.pushed ? `pushed to ${w.pushed}` : 'not pushed'}` : '';
+      return here ? { text: `in this folder, not committed (${workFiles(w, 6)})${rest}`, missing: false }
+        : { text: `${f ? away : `on ${who}'s computer`}, not committed (${workFiles(w, 6)})${rest}`, missing: !!f };
+    }
+    case 'unpushed':
+      return here ? { text: `in this folder: ${commits}, not pushed`, missing: false }
+        : { text: `${f ? away : `on ${who}'s computer`}: ${commits}, not pushed`, missing: !!f };
+    default: {
+      const has = pushedHas();
+      return { text: `pushed to ${w.pushed} (${commits})${has}`, missing: has.startsWith(`; this folder doesn't`) };
+    }
+  }
+}
+
+/**
+ * "Where the code is": the turns of this conversation that changed files, where each one's
+ * changes are, and what this folder lacks. Also changes from the runner's other shared
+ * branches, which share its one folder. Empty when no turn changed files.
+ */
+function codeSection(s: SpaceState, turn: Turn, r: Reader): string {
+  const branch = s.branches[turn.branchId];
+  if (!branch) return '';
+  const changed = (t: Turn | undefined): t is Turn => !!t && t.id !== turn.id && !isOneOff(t) && workStatus(t.work) !== 'none';
+  const hist = historyTurns(s, branch.id).filter((t) => changed(t) && !(t.private && t.runnerId !== turn.runnerId));
+  const inHist = new Set(hist.map((t) => t.id));
+  // Other branches' turns in this same folder (never a private lane's or a recap's: this is read by everyone).
+  const elsewhere = (r.folder?.here ?? []).map((id) => s.turns[id]).filter((t): t is Turn => changed(t) && !inHist.has(t.id) && !t.private && !s.branches[t.branchId]?.private);
+  if (!hist.length && !elsewhere.length) return '';
+  const shown = hist.slice(-12);
+  let missing = 0;
+  const lines = shown.map((t) => {
+    const st = standing(s, t, r);
+    if (st.missing) missing++;
+    return `- ${turnLabel(s, t)}: ${st.text}.`;
+  });
+  if (hist.length > shown.length) lines.unshift(`- ${hist.length - shown.length} earlier turns changed files too.`);
+  for (const t of elsewhere.slice(-6)) {
+    const b = s.branches[t.branchId];
+    const conv = s.conversations[t.conversationId];
+    const from = t.conversationId !== turn.conversationId ? `the conversation “${conv?.title ?? '?'}”` : b && isMain(s, b.id) ? 'the main line' : `the branch “${b?.name ?? '?'}”`;
+    lines.push(`- Also in this folder, from ${from}: ${turnLabel(s, t)}: ${standing(s, t, r).text}.`);
+  }
+  const head = r.folder
+    ? `Where the code is (each person's Claude works in their own folder; you can read only this one, ${memberName(s, r.runnerId)}'s):`
+    : `Where the code is (on people's computers; you can't read any of it from here):`;
+  const tail = !r.folder ? ''
+    : missing ? `\nChanges not in this folder aren't in the files you can read. Don't assume they're there, and don't quietly redo them: say what's missing and whose it is (they can push it, then a pull brings it here). Pull, commit or push only when someone asks.`
+    : hist.length ? '\nEvery change above is in this folder.' : '';
+  return `${head}\n${lines.join('\n')}${tail}`;
+}
 
 /**
  * What a runner hands its Claude for one shared turn. Each person's Claude Code
@@ -19,6 +127,8 @@ export interface ContextOptions {
   sinceTurnId?: Id | null;
   /** Rough cap on the history block, in characters. */
   maxHistoryChars?: number;
+  /** The runner's own folder, when it has one (Claude Code): which changes it holds. */
+  folder?: FolderView;
 }
 
 /**
@@ -49,7 +159,7 @@ function partsText(s: SpaceState, t: Turn, withPositions: boolean): string {
   return parts.map((p) => `${who(p)}: ${p.text}${filesLine(s, p.files)}`).join('\n\n');
 }
 
-function turnTranscript(s: SpaceState, t: Turn, maxAnswer: number): string {
+function turnTranscript(s: SpaceState, t: Turn, maxAnswer: number, r?: Reader): string {
   // Reveal turns show positions without names, and stay that way in later context.
   const who = t.mode === 'merge-note' ? 'Merge note'
     : t.mode === 'reveal' ? `Positions people held back (unattributed):\n${t.parts.map((p, i) => `${i + 1}. ${p.text}`).join('\n')}`
@@ -58,16 +168,16 @@ function turnTranscript(s: SpaceState, t: Turn, maxAnswer: number): string {
   const own = t.steps.filter((x) => x.under === undefined);
   const steps = own.length ? `\n[Claude used ${own.length} step${own.length === 1 ? '' : 's'}: ${own.slice(0, 6).map((x) => x.text).join('; ')}${own.length > 6 ? '; …' : ''}]` : '';
   const answer = t.status === 'done' ? clip(t.text, maxAnswer) : t.status === 'stopped' ? `${clip(t.text, maxAnswer)} [stopped]` : `[${t.status}]`;
-  return `${who}${steps}\nClaude (run by ${memberName(s, t.runnerId)}): ${answer}`;
+  return `${who}${steps}${workNote(s, t, r)}\nClaude (run by ${memberName(s, t.runnerId)}): ${answer}`;
 }
 
 /** Turns word for word, newest kept whole, oldest cut short or left out past `cap` characters. */
-function transcript(s: SpaceState, turns: Turn[], cap: number): string {
+function transcript(s: SpaceState, turns: Turn[], cap: number, r?: Reader): string {
   const lines: string[] = [];
   let used = 0;
   for (let i = turns.length - 1; i >= 0; i--) {
     const full = i >= turns.length - 4;
-    const line = turnTranscript(s, turns[i], full ? 4000 : 400);
+    const line = turnTranscript(s, turns[i], full ? 4000 : 400, r);
     if (used + line.length > cap && lines.length) { lines.unshift(`[${i + 1} earlier turn${i ? 's' : ''} left out]`); break; }
     lines.unshift(line);
     used += line.length;
@@ -81,6 +191,7 @@ export function buildTurnContext(s: SpaceState, turn: Turn, opts: ContextOptions
   const runner = memberName(s, turn.runnerId);
   const here = Object.values(s.members).filter((m) => !m.leftAt);
   const main = branch ? isMain(s, branch.id) : true;
+  const reader: Reader = { runnerId: turn.runnerId, folder: opts.folder };
 
   const context: string[] = [];
 
@@ -121,7 +232,7 @@ export function buildTurnContext(s: SpaceState, turn: Turn, opts: ContextOptions
     const missing = hist.slice(from);
     if (missing.length) {
       const head = opts.sinceTurnId ? 'Since your last turn here, others ran these turns:' : `The conversation so far${branch.parentId ? ` (this branch continues from ${s.branches[branch.parentId]?.name ?? 'its parent'})` : ''}:`;
-      context.push(`${head}\n\n${transcript(s, missing, opts.maxHistoryChars ?? 24000)}`);
+      context.push(`${head}\n\n${transcript(s, missing, opts.maxHistoryChars ?? 24000, reader)}`);
     }
     for (const c of citedTurns(s, turn)) context.push(`${memberName(s, c.by)} cites a turn from ${c.where}, word for word:\n\n${transcript(s, [c.turn], opts.maxHistoryChars ?? 24000)}`);
     // A merge note is written on the target, whose history doesn't hold the branch: give its writer the branch's own turns.
@@ -140,6 +251,8 @@ export function buildTurnContext(s: SpaceState, turn: Turn, opts: ContextOptions
 
   const notes = Object.values(s.notes).filter((n) => n.branchId === turn.branchId);
   if (notes.length) context.push('Notes people shared:\n' + notes.map((n) => clip(noteLine(s, n), 1600)).join('\n\n'));
+  const code = codeSection(s, turn, reader);
+  if (code) context.push(code);
 
   let prompt: string;
   switch (turn.mode) {
@@ -214,6 +327,8 @@ export interface SessionTurnOptions {
   lastState?: string;
   /** A safety cap on turns given at once, in characters (oldest left out past it). */
   maxChars?: number;
+  /** The runner's own folder: which changes from earlier turns it holds. */
+  folder?: FolderView;
 }
 
 /** The stable instructions for a shared branch session: the same for every turn it runs. */
@@ -232,13 +347,14 @@ export function sessionSystem(s: SpaceState, turn: Turn): string {
   return [
     `This session is a shared conversation in Multiplayer, ${where}. Several people write each turn together, and each part is labelled with who wrote it; treat everyone's parts equally.`,
     `It runs on ${runner}'s machine and plan, but everyone in the space reads your answers. Keep ${runner}'s personal memory, notes, credentials and unrelated files out of it unless they're asked for in the turn.`,
+    `It works in ${runner}'s own folder. Everyone else's turns run in their own copies, so a change from someone else's turn is here only once it's pushed and pulled; "Where the code is" notes say which changes this folder has.`,
     `Turns this session didn't run itself (other people's, or ones stopped or cut short) reach you as "[Multiplayer]" notes before the prompt, word for word.`,
     `When the group settles something, record it with the propose_decision tool; when something stays open, use add_question. Don't record things nobody has agreed on.`,
   ].join('\n');
 }
 
 /** Facts about the space the session should know: they're only sent when they change. */
-function spaceState(s: SpaceState, turn: Turn): string {
+function spaceState(s: SpaceState, turn: Turn, r: Reader): string {
   const branch = s.branches[turn.branchId];
   const out: string[] = [];
   if (!turn.private) out.push(`People here: ${Object.values(s.members).filter((m) => !m.leftAt).map((m) => `${m.name} (${m.role})`).join(', ')}.`);
@@ -252,6 +368,9 @@ function spaceState(s: SpaceState, turn: Turn): string {
   const notes = Object.values(s.notes).filter((n) => n.branchId === turn.branchId);
   if (notes.length) out.push('Notes people shared:\n' + notes.map((n) => noteLine(s, n)).join('\n\n'));
   if (branch?.editOf && s.turns[branch.editOf]) out.push(`This branch was made by editing a shared turn. The original asked: ${partsText(s, s.turns[branch.editOf], true)}`);
+  // Sent again whenever it changes: a push, a pull, a commit.
+  const code = codeSection(s, turn, r);
+  if (code) out.push(code);
   return out.join('\n\n');
 }
 
@@ -268,7 +387,7 @@ function citedTurns(s: SpaceState, turn: Turn): { by: string; where: string; tur
 }
 
 /** A turn as the session reads one it didn't run: the parts, the steps, the whole answer. */
-function fullTurn(s: SpaceState, t: Turn, nested = false): string {
+function fullTurn(s: SpaceState, t: Turn, r: Reader, nested = false): string {
   const who = t.mode === 'merge-note' ? 'Merge note'
     : t.mode === 'reveal' ? `Positions people held back (unattributed):\n${t.parts.map((p, i) => `${i + 1}. ${p.text}`).join('\n')}`
     : partsText(s, t, t.mode !== 'view-first');
@@ -276,19 +395,19 @@ function fullTurn(s: SpaceState, t: Turn, nested = false): string {
   const steps = own.length ? `\n[Claude used ${own.length} step${own.length === 1 ? '' : 's'}: ${own.map((x) => x.text).join('; ')}]` : '';
   const answer = (t.status === 'done' ? t.text : t.status === 'stopped' ? `${t.text} [stopped]` : `[${t.status}]`) + filesLine(s, t.files, 'shared with everyone');
   // A turn that cites another brings it along (one level deep), so every session reads what it read.
-  const cited = nested ? [] : citedTurns(s, t).map((c) => `(${memberName(s, c.by)} cited this turn from ${c.where}:)\n${fullTurn(s, c.turn, true)}`);
+  const cited = nested ? [] : citedTurns(s, t).map((c) => `(${memberName(s, c.by)} cited this turn from ${c.where}:)\n${fullTurn(s, c.turn, r, true)}`);
   // A turn brought in happened in that person's own conversation elsewhere, before it came here.
   const where = t.imported
     ? `in ${memberName(s, t.runnerId)}'s own ${t.imported.from === 'claude-code' ? 'Claude Code session' : 'claude.ai chat'}, before it was brought here`
     : `on ${memberName(s, t.runnerId)}'s machine`;
-  return [...cited, `${who}${steps}\nClaude (${where}): ${answer}`].join('\n\n');
+  return [...cited, `${who}${steps}${t.imported ? '' : workNote(s, t, r)}\nClaude (${where}): ${answer}`].join('\n\n');
 }
 
-function fullTurns(s: SpaceState, turns: Turn[], cap: number): string {
+function fullTurns(s: SpaceState, turns: Turn[], cap: number, r: Reader): string {
   const lines: string[] = [];
   let used = 0;
   for (let i = turns.length - 1; i >= 0; i--) {
-    const line = fullTurn(s, turns[i]);
+    const line = fullTurn(s, turns[i], r);
     if (used + line.length > cap && lines.length) { lines.unshift(`[${i + 1} earlier turn${i ? 's' : ''} left out]`); break; }
     lines.unshift(line);
     used += line.length;
@@ -301,8 +420,9 @@ export function buildSessionTurn(s: SpaceState, turn: Turn, opts: SessionTurnOpt
   const { prompt } = buildTurnContext(s, turn);
   const cap = opts.maxChars ?? 400_000;
   const notes: string[] = [];
+  const r: Reader = { runnerId: turn.runnerId, folder: opts.folder };
 
-  const state = spaceState(s, turn);
+  const state = spaceState(s, turn, r);
   if (state !== opts.lastState) notes.push(state);
 
   if (branch) {
@@ -312,14 +432,14 @@ export function buildSessionTurn(s: SpaceState, turn: Turn, opts: SessionTurnOpt
     const missing = hist.slice(at + 1);
     if (missing.length) {
       const head = at >= 0 ? 'Since your last turn here, the conversation went on:' : `The conversation so far${branch.parentId ? ` (this branch continues from ${s.branches[branch.parentId]?.name ?? 'its parent'})` : ''}:`;
-      notes.push(`${head}\n\n${fullTurns(s, missing, cap)}`);
+      notes.push(`${head}\n\n${fullTurns(s, missing, cap, r)}`);
     }
-    for (const c of citedTurns(s, turn)) notes.push(`${memberName(s, c.by)} cites a turn from ${c.where}, word for word:\n\n${fullTurn(s, c.turn)}`);
+    for (const c of citedTurns(s, turn)) notes.push(`${memberName(s, c.by)} cites a turn from ${c.where}, word for word:\n\n${fullTurn(s, c.turn, r)}`);
     const merge = turn.mode === 'merge-note' && turn.mergeId ? s.merges[turn.mergeId] : undefined;
     const merged = merge ? s.branches[merge.fromBranchId] : undefined;
     if (merged) {
       const own = turnsOf(s, merged.id).filter((t) => t.status === 'done' || t.status === 'stopped');
-      notes.push(own.length ? `The branch “${merged.name}” being merged, its own turns since it left ${branch.name}:\n\n${fullTurns(s, own, cap)}` : `The branch “${merged.name}” being merged has no turns of its own.`);
+      notes.push(own.length ? `The branch “${merged.name}” being merged, its own turns since it left ${branch.name}:\n\n${fullTurns(s, own, cap, r)}` : `The branch “${merged.name}” being merged has no turns of its own.`);
     }
   }
   if (turn.takenFrom) notes.push(`${memberName(s, turn.takenFrom)}'s Claude went quiet while running this turn, so ${memberName(s, turn.runnerId)} took it over. Start it fresh.`);

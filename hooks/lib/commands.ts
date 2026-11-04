@@ -1,5 +1,5 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import type { FilesPush, Id, ImportSource, ImportTurn, MemberId, MergeChoice, Policy, Role, SharedFile, Step, Turn, TurnFailure, Usage, Member } from './types.ts';
+import type { FilesPush, Id, ImportSource, ImportTurn, MemberId, MergeChoice, Policy, Role, SharedFile, Step, Turn, TurnFailure, TurnWork, Usage, Member } from './types.ts';
 
 /** What people (through the web app or claude.ai) and runners ask the server to do. */
 export type Command =
@@ -70,6 +70,8 @@ export type Command =
   | { type: 'runner.decision'; turnId: Id; text: string; replaces?: string }
   | { type: 'runner.question'; turnId: Id; text: string }
   | { type: 'runner.pushed'; push: Omit<FilesPush, 'id' | 'memberId' | 'at'> }
+  /** What a turn changed in its runner's folder: sent when it ends, and again when that changes (committed, pushed). */
+  | { type: 'runner.work'; turnId: Id; work: Omit<TurnWork, 'at'> }
   // server only
   | { type: 'server.pause'; turnId: Id }
   | { type: 'server.resume'; turnId: Id }

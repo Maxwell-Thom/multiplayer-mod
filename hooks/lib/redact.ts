@@ -101,6 +101,7 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
     case 'turn.done':
     case 'turn.failed':
     case 'turn.stopped':
+    case 'turn.work':
       return turnAudience(e.turnId);
     case 'sharing.changed': return [e.memberId];
     case 'schedule.created': return branchAudience(e.schedule.branchId);
