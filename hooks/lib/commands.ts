@@ -73,6 +73,12 @@ export type Command =
   // server only
   | { type: 'server.pause'; turnId: Id }
   | { type: 'server.resume'; turnId: Id }
+  /** Claude, in a turn this runner runs, sets up work for later: in `inMs`, then every `everyMs`, `times` times at most. */
+  | { type: 'runner.schedule'; turnId: Id; prompt: string; inMs?: number; everyMs?: number; times?: number }
+  /** Anyone who may prompt can stop one. */
+  | { type: 'schedule.stop'; scheduleId: Id }
+  /** It's due: the server sends it. */
+  | { type: 'server.schedule-fire'; scheduleId: Id }
   /** Its bytes are stored: the file joins the space (the upload route sends this). */
   | { type: 'server.file'; file: SharedFile }
   | { type: 'server.note'; turnId: Id; text: string };

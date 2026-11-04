@@ -76,6 +76,9 @@ const SPECS: Record<Command['type'], Spec> = {
   'server.resume': { turnId: 'id' },
   'server.note': { turnId: 'id', text: 'str:200000' },
   'server.file': { file: 'obj' },
+  'server.schedule-fire': { scheduleId: 'id' },
+  'runner.schedule': { turnId: 'id', prompt: 'str:4000', inMs: 'num?', everyMs: 'num?', times: 'num?' },
+  'schedule.stop': { scheduleId: 'id' },
 };
 
 /** A string usable as a record key: short, and not something every object already has. */

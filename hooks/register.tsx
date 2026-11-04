@@ -135,6 +135,7 @@ export const register: Register = (on, options) => {
         return t
       },
       write: (path, text) => $.fs.write(path, text),
+      realPath: async (path) => (await $.fs.stat(path, { resolve: true })).realPath,
       readBytes: async (path) => {
         const r = await $.fs.read(path, { as: 'bytes' })
         if (typeof r === 'string' || !r || typeof r.base64 !== 'string') throw new Error(`${path} couldn't be read`)

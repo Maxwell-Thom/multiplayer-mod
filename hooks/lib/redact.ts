@@ -50,6 +50,7 @@ export function redactState(full: SpaceState, memberId: MemberId): SpaceState {
     merges: Object.fromEntries(Object.entries(s.merges).filter(([, m]) => !hiddenBranches.has(m.fromBranchId))),
     pushes: s.pushes.filter((p) => !p.branchId || !hiddenBranches.has(p.branchId)),
     notes: Object.fromEntries(Object.entries(s.notes).filter(([, n]) => !hiddenBranches.has(n.branchId))),
+    ...(s.schedules ? { schedules: Object.fromEntries(Object.entries(s.schedules).filter(([, x]) => !hiddenBranches.has(x.branchId))) } : {}),
     ...(s.files ? { files: Object.fromEntries(Object.entries(s.files).filter(([, f]) => !hiddenBranches.has(f.branchId) && !(f.turnId && hiddenTurns.has(f.turnId)))) } : {}),
   };
 }
@@ -102,6 +103,8 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
     case 'turn.stopped':
       return turnAudience(e.turnId);
     case 'sharing.changed': return [e.memberId];
+    case 'schedule.created': return branchAudience(e.schedule.branchId);
+    case 'schedule.updated': return branchAudience((after.schedules?.[e.scheduleId] ?? before.schedules?.[e.scheduleId])?.branchId);
     case 'file.added': return e.file.turnId ? turnAudience(e.file.turnId) : branchAudience(e.file.branchId);
     case 'handoff.offered': return branchAudience(e.handoff.branchId);
     case 'handoff.updated': return branchAudience((after.handoffs[e.handoffId] ?? before.handoffs[e.handoffId])?.branchId);

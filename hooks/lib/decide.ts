@@ -5,8 +5,8 @@ import {
   activeTurn, branchDecisions, canSee, clip, historyTurns, isActive, isMain, isOneOff, latestTurnId, mainOf,
   memberName, nextDecisionId, nextQuestionId, hhmm, modelLabel, turnsOf,
 } from './helpers.ts';
-import type { Branch, Decision, MergeItem, Part, Policy, SharedFile, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
-import { DEFAULT_POLICY, FILE_MAX_BYTES, PART_FILES_MAX } from './types.ts';
+import type { Branch, Decision, MergeItem, Part, Policy, Schedule, SharedFile, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
+import { DEFAULT_POLICY, FILE_MAX_BYTES, PART_FILES_MAX, SCHEDULE_MAX_MS, SCHEDULE_MIN_MS, SCHEDULES_PER_MEMBER } from './types.ts';
 import { invalid } from './validate.ts';
 
 /** Turns a conversation brought in may have in all. */
@@ -772,6 +772,53 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const t = s.turns[cmd.turnId];
       if (!t || t.status !== 'paused') return ok();
       return ok({ type: 'turn.resumed', turnId: t.id });
+    }
+    case 'runner.schedule': {
+      // Claude asked for work later in a turn this runner runs: kept by the space, shown to everyone.
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor || !isActive(t)) return fail('Set up work for later from a turn you’re running.', 'forbidden');
+      const prompt = cmd.prompt.trim();
+      if (!prompt) return fail('Say what to do then.');
+      const ok_ms = (v: number | undefined) => v === undefined || (Number.isFinite(v) && v >= SCHEDULE_MIN_MS && v <= SCHEDULE_MAX_MS);
+      if (!ok_ms(cmd.inMs) || !ok_ms(cmd.everyMs)) return fail('Between a minute and 30 days from now, and at least a minute apart.');
+      if (cmd.inMs === undefined && cmd.everyMs === undefined) return fail('Say when: in a while, or every so often.');
+      if (cmd.times !== undefined && (!Number.isInteger(cmd.times) || cmd.times < 1 || cmd.times > 100)) return fail('Up to 100 times.');
+      const mine = Object.values(s.schedules ?? {}).filter((x) => x.by === actor && x.status === 'on').length;
+      if (mine >= SCHEDULES_PER_MEMBER) return fail(`You have ${SCHEDULES_PER_MEMBER} running already here. Stop one first.`);
+      const schedule: Schedule = {
+        id: ctx.id('sc'), branchId: t.branchId, by: actor as MemberId, prompt, next: ctx.now + (cmd.inMs ?? cmd.everyMs!), status: 'on', at: ctx.now, fromTurn: t.id,
+        ...(cmd.everyMs !== undefined ? { everyMs: cmd.everyMs } : {}),
+        ...(cmd.times !== undefined && cmd.everyMs !== undefined ? { left: cmd.times } : {}),
+      };
+      return ok({ type: 'schedule.created', schedule });
+    }
+    case 'schedule.stop': {
+      const deny = needWrite(); if (deny) return deny;
+      const x = s.schedules?.[cmd.scheduleId];
+      if (!x || !canSee(s, actor as MemberId, x.branchId)) return fail('No such schedule.');
+      if (x.status !== 'on') return ok();
+      return ok({ type: 'schedule.updated', scheduleId: x.id, patch: { status: 'off', stoppedBy: actor as MemberId } });
+    }
+    case 'server.schedule-fire': {
+      const x = s.schedules?.[cmd.scheduleId];
+      if (!x || x.status !== 'on' || x.next > ctx.now) return fail('Not due.', 'state');
+      const b = s.branches[x.branchId];
+      const runner = s.members[x.by];
+      // Its branch or its person gone: it stops, saying so.
+      if (!b || b.state === 'merged' || !runner || runner.leftAt) return ok({ type: 'schedule.updated', scheduleId: x.id, patch: { status: 'off', stoppedBy: 'server' } });
+      // One turn at a time on a branch: it waits for the running one.
+      if (activeTurn(s, b.id)) return fail('Busy.', 'busy');
+      const turn: Turn = {
+        id: ctx.id('t'), branchId: b.id, conversationId: b.conversationId, parts: [{ memberId: x.by, text: x.prompt }], senderId: x.by, runnerId: x.by,
+        mode: 'normal', status: 'requested', requestedAt: ctx.now, steps: [], text: '', model: b.model.name, private: b.private || undefined, scheduled: x.id,
+      };
+      const left = x.left !== undefined ? x.left - 1 : undefined;
+      const again = x.everyMs !== undefined && (left === undefined || left > 0);
+      const out: EventBody[] = [];
+      if (b.state === 'parked') out.push({ type: 'branch.updated', branchId: b.id, patch: { state: 'active' } });
+      out.push({ type: 'turn.requested', turn, consumed: [] });
+      out.push({ type: 'schedule.updated', scheduleId: x.id, patch: again ? { next: Math.max(x.next + x.everyMs!, ctx.now + SCHEDULE_MIN_MS), lastTurn: turn.id, ...(left !== undefined ? { left } : {}) } : { status: 'off', lastTurn: turn.id, ...(left !== undefined ? { left } : {}) } });
+      return ok(...out);
     }
     case 'server.file': {
       // The upload route stored its bytes and says who sent it, where, and from which turn.

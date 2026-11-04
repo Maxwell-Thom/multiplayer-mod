@@ -26,6 +26,7 @@ export function emptyState(): SpaceState {
     seen: {},
     sharing: {},
     files: {},
+    schedules: {},
   };
 }
 
@@ -67,6 +68,14 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'member.joined':
       s.members = { ...s.members, [e.member.id]: e.member };
       return s;
+    case 'schedule.created':
+      s.schedules = { ...(s.schedules ?? {}), [e.schedule.id]: e.schedule };
+      return s;
+    case 'schedule.updated': {
+      const x = s.schedules?.[e.scheduleId];
+      if (x) s.schedules = { ...s.schedules, [x.id]: { ...x, ...e.patch } };
+      return s;
+    }
     case 'file.added': {
       s.files = { ...(s.files ?? {}), [e.file.id]: e.file };
       const t = e.file.turnId ? s.turns[e.file.turnId] : undefined;

@@ -66,6 +66,8 @@ export type Port = {
   read: (path: string) => Promise<string>
   /** A file's bytes, as base64 (for sharing a file Claude made). */
   readBytes?: (path: string) => Promise<string>
+  /** Where a path really lands: absolute, links followed (undefined: it leads nowhere). */
+  realPath?: (path: string) => Promise<string | undefined>
   /** A folder's entries, `{ name, kind, size, mtimeMs }` each. */
   list: (path: string) => Promise<{ name: string; kind: string; size: number; mtimeMs: number }[]>
   /** CLAUDE_CONFIG_DIR, where this Claude Code keeps its sessions (unset: ~/.claude). */

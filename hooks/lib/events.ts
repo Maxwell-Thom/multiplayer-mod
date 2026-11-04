@@ -2,7 +2,7 @@
 import type {
   Ask, Branch, ChatMessage, Conversation, Decision, FilesPush, Handoff, Member, MemberId, Merge,
   MergeChoice, ModelPin, Note, Part, Policy, Presence, Question, RunnerInfo, Space, Step, TimelineItem,
-  SharedFile, Turn, TurnFailure, TurnMode, Usage, Id,
+  Schedule, SharedFile, Turn, TurnFailure, TurnMode, Usage, Id,
 } from './types.ts';
 import type { AskQuestion } from './helpers.ts';
 
@@ -12,6 +12,8 @@ export type EventBody =
   | { type: 'member.joined'; member: Member }
   | { type: 'member.updated'; memberId: MemberId; patch: Partial<Pick<Member, 'name' | 'role' | 'notify' | 'limit'>> }
   | { type: 'file.added'; file: SharedFile }
+  | { type: 'schedule.created'; schedule: Schedule }
+  | { type: 'schedule.updated'; scheduleId: Id; patch: Partial<Pick<Schedule, 'next' | 'left' | 'status' | 'lastTurn' | 'stoppedBy'>> }
   /** Seen only by that member. */
   | { type: 'sharing.changed'; memberId: MemberId; source: string; name: string; on: boolean }
   | { type: 'member.left'; memberId: MemberId }

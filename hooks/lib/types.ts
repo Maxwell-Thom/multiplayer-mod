@@ -127,6 +127,37 @@ export interface SharedFile {
   from: 'upload' | 'claude';
 }
 
+/**
+ * Background work Claude set up in a shared turn ("check again in ten minutes", a /loop): each time
+ * it's due, the server sends its prompt as a turn on the branch, on its person's Claude Code and
+ * plan, so what it finds is in the conversation everyone (and every later session) reads.
+ */
+export interface Schedule {
+  id: Id;
+  branchId: Id;
+  /** Whose Claude Code and plan it runs on: the runner of the turn that made it. */
+  by: MemberId;
+  prompt: string;
+  /** Repeats this often; absent, it runs once. */
+  everyMs?: number;
+  /** When it's next due. */
+  next: number;
+  /** Runs left, when it was given a number. */
+  left?: number;
+  status: 'on' | 'off';
+  at: number;
+  /** The turn that set it up. */
+  fromTurn?: Id;
+  /** Its last run. */
+  lastTurn?: Id;
+  stoppedBy?: MemberId | 'server';
+}
+
+/** Schedules' bounds: every one at least a minute apart, none further off than 30 days, a few per person. */
+export const SCHEDULE_MIN_MS = 60_000;
+export const SCHEDULE_MAX_MS = 30 * 24 * 3600_000;
+export const SCHEDULES_PER_MEMBER = 10;
+
 /** The most a file may be, and how many one part may carry. */
 export const FILE_MAX_BYTES = 25 * 1024 * 1024;
 export const PART_FILES_MAX = 10;
@@ -184,6 +215,8 @@ export interface Turn {
   parts: { memberId: MemberId; text: string; position?: boolean; editedBy?: MemberId; cites?: Id; files?: Id[] }[];
   /** Files Claude shared from this turn (SharedFile ids). */
   files?: Id[];
+  /** Sent by a schedule (its id), not by a person just now. */
+  scheduled?: Id;
   senderId: MemberId;
   /** The member whose Claude Code runs it (sender, or whoever took over). */
   runnerId: MemberId;
@@ -394,6 +427,8 @@ export interface SpaceState {
   sharing?: Record<MemberId, Record<string, { name: string; at: number }>>;
   /** Files attached or shared in this space, by id. */
   files?: Record<Id, SharedFile>;
+  /** Background work set up in shared turns, by id. */
+  schedules?: Record<Id, Schedule>;
 }
 
 /** Live, never stored: who is doing what right now. */

@@ -549,14 +549,21 @@ export class Runner {
     if (!a || !t || !w || !this.io.readBytes) return ['Sharing a file isn’t available here.', true]
     const raw = typeof m.input.path === 'string' ? m.input.path.trim() : ''
     if (!raw) return ['Give the file’s path.', true]
+    // A colon past the drive names a hidden stream (Windows), not the file.
+    if (raw.replace(/^[a-z]:/i, '').includes(':')) return ['That path names a hidden stream: share the file itself.', true]
+    const given = /^([a-z]:)?[\\/]/i.test(raw) ? raw : `${this.cwd}/${raw}`
+    // Where it really lands (links followed, `..` folded), and the folder resolved the same way:
+    // the check and the read are on that one path, so a link or a spelling can't step outside.
+    const real = await soft(() => this.io.realPath!(given))
+    const root = await soft(() => this.io.realPath!(this.cwd))
+    if (!this.io.realPath || !real || !root) return [`Couldn’t find ${raw} on this computer.`, true]
     // A file outside the project, or a secret, only with its owner's say: this very call allowed
     // in Multiplayer, or that kind shared for the space (docs/PRIVACY.md).
-    const src = privateSource('mcp__multiplayer__share_file', { path: raw }, this.cwd)
+    const src = privateSource('mcp__multiplayer__share_file', { path: real.replace(/[. ]+$/, '') }, root)
     if (src && !m.approved && !this.state?.sharing?.[this.me]?.[src.id]) return [`${raw} is one of ${src.label}: it isn't shared from here unless its owner allows it in the space. Share a file in the project instead, or ask them.`, true]
-    const path = /^([a-z]:)?[\\/]/i.test(raw) ? raw : `${this.cwd}/${raw}`
     const name = (typeof m.input.name === 'string' && m.input.name.trim()) || raw.split(/[\\/]/).pop() || 'file'
     let base64: string
-    try { base64 = await this.io.readBytes(path) } catch (err) { return [`Couldn’t read ${raw}: ${(err as Error).message}`, true] }
+    try { base64 = await this.io.readBytes(real) } catch (err) { return [`Couldn’t read ${raw}: ${(err as Error).message}`, true] }
     const size = Math.floor((base64.length * 3) / 4)
     if (size > FILE_MAX_BYTES) return [`${name} is ${(size / 1048576).toFixed(1)} MB; a shared file can be up to ${FILE_MAX_BYTES / 1048576} MB.`, true]
     try {
