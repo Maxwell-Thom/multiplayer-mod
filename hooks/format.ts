@@ -46,6 +46,7 @@ function hostOf(url: string): string {
 export function describeTool(tool: string, input: Record<string, unknown>, cwd: string, home?: string): string {
   const path = (k: string) => sharePath(str(input[k]), cwd)
   switch (tool) {
+    case 'ExitPlanMode': return 'Put the plan up for approval'
     case 'Read': return `Read ${path('file_path')}`
     case 'Write': return `Write ${path('file_path')}`
     case 'Edit': case 'MultiEdit': return `Edit ${path('file_path')}`

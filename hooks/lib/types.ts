@@ -165,6 +165,8 @@ export interface Turn {
   /** The member whose Claude Code runs it (sender, or whoever took over). */
   runnerId: MemberId;
   mode: TurnMode;
+  /** Run in Claude Code's plan mode: Claude plans first (reading only), then builds once its sender approves. */
+  plan?: boolean;
   status: TurnStatus;
   requestedAt: number;
   startedAt?: number;

@@ -35,6 +35,11 @@ export type ChildOptions = {
   projectSetup?: boolean
   /** With projectSetup: what of the person's user settings stays anyway (see keptUserSettings). */
   keep?: Record<string, unknown>
+  /**
+   * The permission mode to start in: 'plan' for a plan turn (Claude plans first, and its plan
+   * comes to the sender to approve); another to leave a plan the session was left in.
+   */
+  permissionMode?: 'plan' | 'default' | 'acceptEdits' | 'auto'
 }
 
 /**
@@ -88,6 +93,7 @@ export function childArgs(o: ChildOptions): string[] {
     '--name', cleanName(o.name),
     '--mcp-config', JSON.stringify({ mcpServers: { multiplayer: { type: 'http', url: o.mcpUrl } } }),
     '--permission-prompt-tool', TOOL_APPROVE,
+    ...(o.permissionMode ? ['--permission-mode', o.permissionMode] : []),
     '--allowedTools', allowed.join(','),
     // The person's own protections hold even when their user settings are left out.
     ...(o.projectSetup ? ['--setting-sources', 'project,local', ...(o.keep ? ['--settings', JSON.stringify(o.keep)] : [])] : []),
@@ -183,6 +189,8 @@ export class StreamReader {
         for (const raw of content) {
           const c = obj(raw)
           if (c.type === 'text' && str(c.text).trim()) { this.done.push(str(c.text)); wrote = true }
+          // The plan Claude puts up for approval (plan mode) is part of its answer: everyone reads it.
+          if (c.type === 'tool_use' && str(c.name) === 'ExitPlanMode' && str(obj(c.input).plan).trim()) { this.done.push(str(obj(c.input).plan)); wrote = true }
           if (c.type === 'tool_use') out.push({ kind: 'tool', id: str(c.id), name: str(c.name), input: obj(c.input) })
         }
         if (wrote) { this.partial = ''; out.unshift({ kind: 'text', text: this.text }) }

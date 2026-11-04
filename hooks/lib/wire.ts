@@ -83,7 +83,7 @@ export type RunnerOutbound =
 /** What the server or the member's web app asks of their runner. */
 export type RunnerInbound =
   /** A turn's session asked permission (its MCP permission prompt): the person can answer here too. */
-  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[] }
+  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[]; plan?: string }
   | { kind: 'approval.cleared'; turnId: Id; requestId: string }
   | { kind: 'files.request'; requestId: string; action: FilesAction }
   /**

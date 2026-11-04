@@ -38,7 +38,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'branch.import': { branchId: 'id', source: 'obj', turns: 'any', model: 'str:100?' },
   'part.add': { branchId: 'id', text: TEXT, position: 'bool?', id: 'id?', cites: 'id?' },
   'part.remove': { partId: 'id' },
-  'turn.send': { branchId: 'id', mode: 'enum:normal|view-first?', handoffId: 'id?' },
+  'turn.send': { branchId: 'id', mode: 'enum:normal|view-first?', handoffId: 'id?', plan: 'bool?' },
   'turn.resolve': { turnId: 'id', pick: 'str:80' },
   'turn.stop': { turnId: 'id' },
   'turn.takeover': { turnId: 'id' },

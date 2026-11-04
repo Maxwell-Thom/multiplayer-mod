@@ -8,6 +8,13 @@ import type { MultiplayerView } from '../types'
 import type { Port } from './port.ts'
 import { EMPTY_VIEW, PANE, Runner } from './runner.ts'
 
+/** JSON with every object's keys in order, so the same input always reads the same. */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`
+  if (v && typeof v === 'object') return `{${Object.keys(v as object).sort().map((k) => `${JSON.stringify(k)}:${canonical((v as Record<string, unknown>)[k])}`).join(',')}}`
+  return JSON.stringify(v) ?? 'null'
+}
+
 const VIEW = { plugin: 'multiplayer', key: 'view' } as const
 const MEMO = { plugin: 'multiplayer', key: 'memo' } as const
 const view = atom(VIEW, EMPTY_VIEW)
@@ -25,10 +32,12 @@ export const register: Register = (on, options) => {
    * deny rules still hold. Only this mod's own calls (the model's come from the engine).
    */
   const bridging = new Map<string, number>()
+  // Exactly the call allowed: the tool and its input (keys in order), never just the tool.
+  const callKey = (tool: string, input: unknown) => `${tool}\u0000${canonical(input)}`
 
   on('tool.check', async ($, e, next) => {
     const r = await next(e)
-    if (!child && r.decision === 'ask' && next.origin.plugin === $.plugin.name && (bridging.get(e.tool) ?? 0) > 0) {
+    if (!child && r.decision === 'ask' && next.origin.plugin === $.plugin.name && (bridging.get(callKey(e.tool, e.input)) ?? 0) > 0) {
       return { ...r, decision: 'allow', reason: 'Allowed in Multiplayer by its owner, for their shared turn.' }
     }
     return r
@@ -90,13 +99,17 @@ export const register: Register = (on, options) => {
       configDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
       listTools: async () => (await $.tool.list()).map((t) => ({ name: t.name, description: t.description })),
       callTool: async (tool, input, approved) => {
-        if (approved) bridging.set(tool, (bridging.get(tool) ?? 0) + 1)
+        const key = callKey(tool, input)
+        if (approved) bridging.set(key, (bridging.get(key) ?? 0) + 1)
         try {
           const r = await $.tool.call({ ...input, tool } as never)
           if (r.deny) return { text: r.deny, isError: true }
           return { text: r.text ?? '', ...(r.isError ? { isError: true } : {}) }
         } finally {
-          if (approved) bridging.set(tool, (bridging.get(tool) ?? 1) - 1)
+          if (approved) {
+            const n = (bridging.get(key) ?? 1) - 1
+            if (n > 0) bridging.set(key, n); else bridging.delete(key)
+          }
         }
       },
     }

@@ -348,7 +348,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         out.push({ type: 'handoff.updated', handoffId: h.id, status: 'taken' });
       }
       const turn = turnFrom(ctx, s, b, parts.map((p) => ({ memberId: p.memberId, text: p.text, position: p.position || undefined, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) })), {
-        mode, status: needsOk ? 'held' : 'requested', handedFrom,
+        mode, status: needsOk ? 'held' : 'requested', handedFrom, ...(cmd.plan ? { plan: true } : {}),
       });
       out.push({ type: 'turn.requested', turn, consumed: parts.map((p) => p.id) });
       if (needsOk) {

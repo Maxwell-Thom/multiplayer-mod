@@ -26,7 +26,8 @@ export type Command =
   /** `cites`: a finished turn from another branch, brought into this one with the part. */
   | { type: 'part.add'; branchId: Id; text: string; position?: boolean; id?: Id; cites?: Id }
   | { type: 'part.remove'; partId: Id }
-  | { type: 'turn.send'; branchId: Id; mode?: 'normal' | 'view-first'; handoffId?: Id }
+  /** `plan`: Claude Code's plan mode: it plans first, and builds once its sender approves the plan. */
+  | { type: 'turn.send'; branchId: Id; mode?: 'normal' | 'view-first'; handoffId?: Id; plan?: boolean }
   | { type: 'turn.resolve'; turnId: Id; pick: string }
   | { type: 'turn.stop'; turnId: Id }
   | { type: 'turn.takeover'; turnId: Id }

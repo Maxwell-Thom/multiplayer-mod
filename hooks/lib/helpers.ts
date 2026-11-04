@@ -278,6 +278,7 @@ export function approvalCard(tool: string, input: Record<string, unknown>): { ti
       const qs = askQuestions(input);
       return qs ? { title: 'Answer Claude’s question', detail: qs.map((q) => q.question).join('\n') } : { title: 'Answer Claude’s question', detail: '' };
     }
+    case 'ExitPlanMode': return { title: 'Approve Claude’s plan', detail: '' };
     // Claude Code's artifact tools, made in the person's own Claude Code (BRIDGED_TOOLS).
     case 'mcp__multiplayer__Artifact': case 'mcp__multiplayer__ArtifactData': case 'mcp__multiplayer__ArtifactComments': {
       // The action and every field that picks what it touches, as they are: never a title Claude chose in their place.
@@ -286,13 +287,13 @@ export function approvalCard(tool: string, input: Record<string, unknown>): { ti
         : action === 'delete' ? 'Delete an artifact in your claude.ai account'
         : action === 'publish' ? (input.url ? 'Change an artifact in your claude.ai account' : 'Publish an artifact in your claude.ai account')
         : `Use your claude.ai artifacts (${clip(action, 30)})`;
+      // The fields that pick what it touches first, then every other field, so nothing in the call is hidden.
       const fields: string[] = [];
       if (action) fields.push(`action: ${clip(action, 60)}`);
-      for (const k of ['file_path', 'url', 'type_url', 'from_url', 'path', 'collection', 'doc_id']) if (str(input[k])) fields.push(`${k}: ${clip(str(input[k]), 300)}`);
-      for (const k of ['file_paths', 'asset_ids', 'paths']) if (Array.isArray(input[k])) fields.push(`${k}: ${clip((input[k] as unknown[]).map(String).join(', '), 500)}`);
-      if (input.files && typeof input.files === 'object') fields.push(`files: ${clip(Object.keys(input.files as object).join(', '), 500)}`);
-      if (input.capabilities !== undefined) fields.push(`capabilities: ${clip(JSON.stringify(input.capabilities), 300)}`);
-      if (input.force === true) fields.push('force: true (discards a newer version)');
+      const first = ['file_path', 'url', 'type_url', 'from_url', 'path', 'collection', 'doc_id', 'file_paths', 'asset_ids', 'paths', 'files', 'capabilities', 'force'];
+      const shown = (k: string, v: unknown) => fields.push(`${k}: ${typeof v === 'string' ? clip(v, 300) : clip(JSON.stringify(v) ?? '', 300)}${k === 'force' && v === true ? ' (discards a newer version)' : ''}`);
+      for (const k of first) if (input[k] !== undefined && input[k] !== '') shown(k, input[k]);
+      for (const k of Object.keys(input).sort()) if (k !== 'action' && !first.includes(k) && input[k] !== undefined) shown(k, input[k]);
       return { title, detail: fields.join('\n') };
     }
     case 'WebFetch': {

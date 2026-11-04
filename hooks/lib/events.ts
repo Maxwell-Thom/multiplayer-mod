@@ -69,7 +69,7 @@ export type LiveMessage =
   | { kind: 'runner'; runner: RunnerInfo }
   | { kind: 'delta'; turnId: Id; text: string }
   /** Sent only to the member whose runner asks: the full request, for approving in the web app. */
-  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[] }
+  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[]; plan?: string }
   | { kind: 'approval.cleared'; turnId: Id; requestId: string }
   /** Web app → its own runner, relayed through the server. */
   | { kind: 'approval.answer'; turnId: Id; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny' }
