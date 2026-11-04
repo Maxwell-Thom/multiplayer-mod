@@ -237,10 +237,47 @@ export function alwaysLabel(s: AlwaysScope): string {
     : 'Allow edits for this turn';
 }
 
+/** One question Claude asks with options to pick from (Claude Code's AskUserQuestion). */
+export interface AskQuestion {
+  question: string;
+  /** A short label for it, e.g. "Auth method". */
+  header: string;
+  options: { label: string; description: string }[];
+  multiSelect: boolean;
+}
+
+/**
+ * AskUserQuestion's input, read safely: 1 to 4 questions, each with up to 6 options. Null when
+ * it isn't that shape, so the request falls back to a plain approval.
+ */
+export function askQuestions(input: Record<string, unknown>): AskQuestion[] | null {
+  const qs = input.questions;
+  if (!Array.isArray(qs) || !qs.length || qs.length > 4) return null;
+  const out: AskQuestion[] = [];
+  for (const q of qs) {
+    if (!q || typeof q !== 'object') return null;
+    const o = q as Record<string, unknown>;
+    if (typeof o.question !== 'string' || !o.question.trim() || o.question.length > 1000) return null;
+    if (!Array.isArray(o.options) || !o.options.length || o.options.length > 6) return null;
+    const options: AskQuestion['options'] = [];
+    for (const op of o.options as unknown[]) {
+      const p = op as Record<string, unknown> | null;
+      if (!p || typeof p.label !== 'string' || !p.label.trim() || p.label.length > 200) return null;
+      options.push({ label: p.label, description: typeof p.description === 'string' ? clip(p.description, 500) : '' });
+    }
+    out.push({ question: o.question, header: typeof o.header === 'string' ? clip(o.header, 40) : '', options, multiSelect: o.multiSelect === true });
+  }
+  return out;
+}
+
 export function approvalCard(tool: string, input: Record<string, unknown>): { title: string; detail: string; site?: string } {
   const str = (v: unknown) => (typeof v === 'string' ? v : '');
   switch (tool) {
     case 'Bash': return { title: 'Run a command', detail: str(input.command) };
+    case 'AskUserQuestion': {
+      const qs = askQuestions(input);
+      return qs ? { title: 'Answer Claude’s question', detail: qs.map((q) => q.question).join('\n') } : { title: 'Answer Claude’s question', detail: '' };
+    }
     case 'WebFetch': {
       const url = str(input.url);
       return { title: 'Fetch a page', detail: url, site: siteOf(url) };

@@ -2,6 +2,7 @@
 import type { Command } from './commands.ts';
 import type { FilesAction, FilesReport, LiveMessage, SpaceEvent } from './events.ts';
 import type { Color, Id, MemberId, Presence, Role, RunnerInfo, SpaceState, Via } from './types.ts';
+import type { AskQuestion } from './helpers.ts';
 
 /**
  * The wire between the server and its two kinds of clients:
@@ -59,13 +60,13 @@ export interface RunnerHello {
 export type RunnerOutbound =
   | { kind: 'delta'; turnId: Id; text: string }
   /** An answer typed at the runner (/multiplayer allow) to a permission question its turn's session asked. */
-  | { kind: 'approval.answer'; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny' }
+  | { kind: 'approval.answer'; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny'; answers?: Record<string, string> }
   | { kind: 'files.report'; requestId?: string; report: FilesReport };
 
 /** What the server or the member's web app asks of their runner. */
 export type RunnerInbound =
   /** A turn's session asked permission (its MCP permission prompt): the person can answer here too. */
-  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string }
+  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[] }
   | { kind: 'approval.cleared'; turnId: Id; requestId: string }
   | { kind: 'files.request'; requestId: string; action: FilesAction }
   /** Stop or start picking up turns (from the person's own web app). */
@@ -78,7 +79,8 @@ export type RunnerInbound =
 export type ClientMessage =
   | { kind: 'command'; reqId: string; cmd: Command }
   | { kind: 'presence'; status: Presence['status']; branchId?: Id; conversationId?: Id }
-  | { kind: 'approval.answer'; turnId: Id; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny' }
+  /** `answers`: for Claude's question (AskUserQuestion), each question's text to the option(s) picked, or the person's own words. */
+  | { kind: 'approval.answer'; turnId: Id; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny'; answers?: Record<string, string> }
   | { kind: 'files.request'; requestId: string; action: FilesAction }
   | { kind: 'runner.pause' }
   | { kind: 'runner.resume' }

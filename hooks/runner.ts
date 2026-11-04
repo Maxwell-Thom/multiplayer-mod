@@ -23,7 +23,7 @@ import * as G from './git.ts'
 import type { Command } from './lib/commands.ts'
 import { buildSessionTurn, parseReplies } from './lib/context.ts'
 import type { FilesAction, FilesReport, SpaceEvent } from './lib/events.ts'
-import { clip, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName } from './lib/helpers.ts'
+import { type AskQuestion, clip, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName } from './lib/helpers.ts'
 import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './transcript.ts'
 import { apply } from './lib/reduce.ts'
 import type { Port } from './port.ts'
@@ -66,7 +66,7 @@ export type Decision = 'allow-once' | 'allow-always' | 'deny'
 export type BranchSession = { id: string; through: string | null; at: Record<string, string>; state?: string; rewind?: boolean }
 
 /** A permission prompt waiting on this person; `always` is what "always" covers, absent when only once is possible. */
-type Pending = { requestId: string; tool: string; title: string; always?: string; i: number | undefined }
+type Pending = { requestId: string; tool: string; title: string; always?: string; questions?: AskQuestion[]; i: number | undefined }
 
 /** The shared turn this runner is running (one at a time). */
 export type Active = {
@@ -1062,7 +1062,7 @@ export class Runner {
     const a = this.active
     if (!a || a.turnId !== m.turnId || a.approvals.has(m.requestId)) return
     const i = a.current.get(m.tool)
-    a.approvals.set(m.requestId, { requestId: m.requestId, tool: m.tool, title: m.title, always: m.always, i })
+    a.approvals.set(m.requestId, { requestId: m.requestId, tool: m.tool, title: m.title, always: m.always, questions: m.questions, i })
     const step = i === undefined ? undefined : a.stepText.get(i)
     if (step) void this.chainCmd(a, { type: 'runner.step', turnId: a.turnId, step: { ...step, state: 'wait' } })
     this.io.toast(`Multiplayer: approval needed (${m.title.toLowerCase()}) for ${a.label}. Answer in the web app, or here with /multiplayer allow or /multiplayer deny.`)
@@ -1084,6 +1084,20 @@ export class Runner {
     const a = this.active
     const p = a ? [...a.approvals.values()][0] : undefined
     if (!a || !p || !this.wire) return 'No approval is waiting.'
+    // Claude's question with options (AskUserQuestion): asked here, as Claude Code itself asks it.
+    if (p.questions?.length) {
+      if (decision === 'deny') {
+        return (await this.wire.live({ kind: 'approval.answer', requestId: p.requestId, decision: 'deny' })) ? `Skipped Claude’s question for ${a.label}.` : 'Couldn’t answer it: it was already answered, or the turn ended.'
+      }
+      const answers: Record<string, string> = {}
+      for (const q of p.questions) {
+        const picked = await soft(() => this.io.ask(q.question, { options: q.options.map((o) => o.label), header: q.header || 'Claude asks' }))
+        if (!picked?.trim()) return 'Not answered. Answer it in the web app, or run /multiplayer allow again.'
+        answers[q.question] = picked.trim()
+      }
+      if (!(await this.wire.live({ kind: 'approval.answer', requestId: p.requestId, decision: 'allow-once', answers }))) return 'Couldn’t answer it: it was already answered, or the turn ended.'
+      return `Answered Claude’s question for ${a.label}.`
+    }
     // "Always" covers only what Claude Code's own "don't ask again" would; anything else is allowed once.
     const once = decision === 'allow-always' && !p.always
     if (once) decision = 'allow-once'

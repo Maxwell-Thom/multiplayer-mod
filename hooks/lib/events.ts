@@ -4,6 +4,7 @@ import type {
   MergeChoice, ModelPin, Note, Part, Policy, Presence, Question, RunnerInfo, Space, Step, TimelineItem,
   Turn, TurnFailure, TurnMode, Usage, Id,
 } from './types.ts';
+import type { AskQuestion } from './helpers.ts';
 
 /** Persisted events. The log of these, folded by `reduce`, is a space. */
 export type EventBody =
@@ -68,7 +69,7 @@ export type LiveMessage =
   | { kind: 'runner'; runner: RunnerInfo }
   | { kind: 'delta'; turnId: Id; text: string }
   /** Sent only to the member whose runner asks: the full request, for approving in the web app. */
-  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string }
+  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[] }
   | { kind: 'approval.cleared'; turnId: Id; requestId: string }
   /** Web app → its own runner, relayed through the server. */
   | { kind: 'approval.answer'; turnId: Id; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny' }
