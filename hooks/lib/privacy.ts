@@ -21,7 +21,12 @@ const HOME_REF = /(^|[\s"'=(])~[A-Za-z0-9._-]*([\\/]|$)|\$\{?(HOME|USERPROFILE|A
 /** A `..` segment: a path that may climb out of the folder. */
 const CLIMBS = /(^|[\\/])\.\.([\\/]|$)/;
 
-const norm = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '');
+/** Forward slashes, no trailing one, except that / and C:/ stay roots. */
+const norm = (p: string) => {
+  const s = p.replace(/\\/g, '/');
+  const t = s.replace(/\/+$/, '');
+  return t === '' && s.startsWith('/') ? '/' : /^[a-z]:$/i.test(t) && s.length > t.length ? `${t}/` : t;
+};
 const isAbs = (p: string) => /^([a-z]:)?\//i.test(p);
 
 /** A path made absolute against the folder, `..` folded; null when it can't be read as a path. */
@@ -121,15 +126,24 @@ export function privateSource(tool: string, input: unknown, cwd?: string): Priva
       if (CREDENTIAL_CMD.test(cmd) || HOME_REF.test(cmd)) return MACHINE;
       if (/(^|[\s"'=<>])(\.env\b|[^\s"']*id_(rsa|ed25519)\b(?!\.pub)|[^\s"']*\.ssh\/)/i.test(cmd)) return SECRETS;
       // Any path-like word that lands outside the folder: absolute, from home, or climbing out with `..`.
+      // /tmp is scratch, unless the command moves there or links things into it.
+      const scratchOk = !/\b(cd|pushd|ln|mklink|New-Item)\b/i.test(cmd);
       for (const raw of cmd.split(/[\s"'`|;&<>()=,]+/)) {
         if (!raw || /^(https?|ftps?|wss?):\/\//i.test(raw)) continue;
-        // A file: URL is a path.
-        const tok = raw.replace(/^file:\/\/(localhost)?/i, '');
-        const pathy = isAbs(norm(tok)) || /^~/.test(tok) || CLIMBS.test(tok) || tok === '..';
+        let tok = raw;
+        // A file: URL is a path; one naming another computer is outside by definition.
+        if (/^file:/i.test(tok)) {
+          const m = /^file:(\/\/([^/]*))?(.*)$/i.exec(tok)!;
+          if (m[2] && !/^(localhost|127\.0\.0\.1)$/i.test(m[2])) return MACHINE;
+          tok = m[3] || '/';
+        }
+        // Absolute as written (a bare / or C:\ too), before any trailing slash is trimmed.
+        const abs = /^([a-z]:)?[\\/]/i.test(tok) || /^[a-z]:$/i.test(tok);
+        const pathy = abs || /^~/.test(tok) || CLIMBS.test(tok) || tok === '..';
         if (!pathy) continue;
         // The scratch places, once `..` is folded: /tmp/../etc is /etc.
-        const folded = isAbs(norm(tok)) ? resolve(tok, '/') : '';
-        if (/^\/dev\/(null|stdout|stderr|tty)$/.test(folded) || /^\/tmp(\/|$)/.test(folded)) continue;
+        const folded = abs ? resolve(tok, '/') || '/' : '';
+        if (/^\/dev\/(null|stdout|stderr|tty)$/.test(folded) || (scratchOk && /^\/tmp(\/|$)/.test(folded))) continue;
         if (!insideFolder(tok, cwd)) return MACHINE;
       }
       return null;
