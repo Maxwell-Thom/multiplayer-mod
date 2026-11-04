@@ -48,6 +48,8 @@ export interface PollResponse {
   resync?: boolean;
   /** A newer runner process said hello for this member: this one should stop polling. */
   superseded?: boolean;
+  /** The server has no record of this runner (it restarted): say hello again. */
+  hello?: boolean;
 }
 
 export interface RunnerHello {

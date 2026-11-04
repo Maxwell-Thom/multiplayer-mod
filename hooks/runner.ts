@@ -526,6 +526,8 @@ export class Runner {
     if (!this.wire || !this.state) throw new Error('not connected')
     const r = await this.wire.poll(this.state.seq, waitSeconds)
     if (r.superseded) return 'superseded'
+    // The server restarted and doesn't know this runner: say hello again (with any turn it runs).
+    if (r.hello) await soft(() => this.hello())
     if (r.resync) {
       // Twice in a row with nothing new: a newer runner session took over this member.
       this.resyncStreak++
