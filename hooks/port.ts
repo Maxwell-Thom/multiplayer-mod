@@ -72,10 +72,11 @@ export type Port = {
   /** The tools this interactive session has, with their descriptions. */
   listTools?: () => Promise<{ name: string; description: string }[]>
   /**
-   * Calls one of them here, for a shared turn whose person already allowed it in Multiplayer:
-   * the answer as the model would read it.
+   * Calls one of them here, for a shared turn: the answer as the model would read it.
+   * `approved`: its person allowed exactly this call in Multiplayer, so where this session would
+   * ask, it doesn't (a deny still holds).
    */
-  callTool?: (tool: string, input: Record<string, unknown>) => Promise<{ text: string; isError?: boolean }>
+  callTool?: (tool: string, input: Record<string, unknown>, approved: boolean) => Promise<{ text: string; isError?: boolean }>
 }
 
 /** The part of the port the git helpers use. */

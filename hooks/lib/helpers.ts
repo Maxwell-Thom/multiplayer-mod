@@ -279,16 +279,22 @@ export function approvalCard(tool: string, input: Record<string, unknown>): { ti
       return qs ? { title: 'Answer Claude’s question', detail: qs.map((q) => q.question).join('\n') } : { title: 'Answer Claude’s question', detail: '' };
     }
     // Claude Code's artifact tools, made in the person's own Claude Code (BRIDGED_TOOLS).
-    case 'mcp__multiplayer__Artifact': {
-      const action = str(input.action) || 'publish';
-      const what = str(input.title) || str(input.file_path) || str(input.url) || str(input.intent);
-      const title = action === 'delete' ? 'Delete an artifact in your claude.ai account'
-        : action === 'publish' ? (input.url ? 'Update an artifact in your claude.ai account' : 'Publish an artifact in your claude.ai account')
+    case 'mcp__multiplayer__Artifact': case 'mcp__multiplayer__ArtifactData': case 'mcp__multiplayer__ArtifactComments': {
+      // The action and every field that picks what it touches, as they are: never a title Claude chose in their place.
+      const action = str(input.action) || (tool === 'mcp__multiplayer__Artifact' ? 'publish' : '');
+      const title = tool !== 'mcp__multiplayer__Artifact' ? `Use an artifact’s ${tool.endsWith('Data') ? 'data' : 'comments'} in your claude.ai account (${clip(action || 'call', 30)})`
+        : action === 'delete' ? 'Delete an artifact in your claude.ai account'
+        : action === 'publish' ? (input.url ? 'Change an artifact in your claude.ai account' : 'Publish an artifact in your claude.ai account')
         : `Use your claude.ai artifacts (${clip(action, 30)})`;
-      return { title, detail: what };
+      const fields: string[] = [];
+      if (action) fields.push(`action: ${clip(action, 60)}`);
+      for (const k of ['file_path', 'url', 'type_url', 'from_url', 'path', 'collection', 'doc_id']) if (str(input[k])) fields.push(`${k}: ${clip(str(input[k]), 300)}`);
+      for (const k of ['file_paths', 'asset_ids', 'paths']) if (Array.isArray(input[k])) fields.push(`${k}: ${clip((input[k] as unknown[]).map(String).join(', '), 500)}`);
+      if (input.files && typeof input.files === 'object') fields.push(`files: ${clip(Object.keys(input.files as object).join(', '), 500)}`);
+      if (input.capabilities !== undefined) fields.push(`capabilities: ${clip(JSON.stringify(input.capabilities), 300)}`);
+      if (input.force === true) fields.push('force: true (discards a newer version)');
+      return { title, detail: fields.join('\n') };
     }
-    case 'mcp__multiplayer__ArtifactData': return { title: 'Change an artifact’s data in your claude.ai account', detail: str(input.url) };
-    case 'mcp__multiplayer__ArtifactComments': return { title: 'Use an artifact’s comments in your claude.ai account', detail: str(input.url) };
     case 'WebFetch': {
       const url = str(input.url);
       return { title: 'Fetch a page', detail: url, site: siteOf(url) };

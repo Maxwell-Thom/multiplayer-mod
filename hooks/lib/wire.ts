@@ -86,8 +86,12 @@ export type RunnerInbound =
   | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[] }
   | { kind: 'approval.cleared'; turnId: Id; requestId: string }
   | { kind: 'files.request'; requestId: string; action: FilesAction }
-  /** A turn's session calls a bridged tool: make the call in this Claude Code and answer with tool.result. */
-  | { kind: 'tool.request'; turnId: Id; requestId: string; tool: string; input: Record<string, unknown> }
+  /**
+   * A turn's session calls a bridged tool: make the call in this Claude Code and answer with
+   * tool.result. `approved`: its owner allowed exactly this call in Multiplayer, so their Claude
+   * Code needn't ask again (their deny rules still hold); absent, it asks as it would anyway.
+   */
+  | { kind: 'tool.request'; turnId: Id; requestId: string; tool: string; input: Record<string, unknown>; approved?: boolean }
   /** Stop or start picking up turns (from the person's own web app). */
   | { kind: 'pause' }
   | { kind: 'resume' }

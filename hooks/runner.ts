@@ -501,7 +501,7 @@ export class Runner {
     if (this.active?.turnId !== m.turnId) return answer('That shared turn isn’t running here.', true)
     if (!(BRIDGED_TOOLS as readonly string[]).includes(m.tool) || !this.io.callTool) return answer(`${m.tool} isn’t available here.`, true)
     try {
-      const r = await this.io.callTool(m.tool, m.input)
+      const r = await this.io.callTool(m.tool, m.input, m.approved === true)
       answer(r.text, r.isError)
     } catch (err) {
       answer(`${m.tool} failed: ${(err as Error).message}`, true)
