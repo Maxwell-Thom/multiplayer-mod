@@ -181,6 +181,18 @@ export const register: Register = (on, options) => {
     return { sections: composed.sections.filter((s) => s.id !== 'memory') }
   })
 
+  // ------------------------------------------------------------------ footer
+
+  // The steady state ("connected", "running Sam's turn") as a dim label at the right of the prompt
+  // footer. The status line is kept for what needs the person: Claude Code draws it as a warning.
+  on('ui.render', { component: 'SessionMode' }, async ($, e, next) => {
+    if (child) return next(e)
+    const v: MultiplayerView = await read($, view)
+    if (!v.isSignedIn || v.needsYou) return next(e)
+    const label = `multiplayer: ${v.space || 'space'}${v.status === 'connected' ? '' : ` · ${v.status}`}`
+    return next({ ...e, props: { ...e.props, modes: [...e.props.modes, label] } })
+  })
+
   // -------------------------------------------------------------------- pane
 
   on('ui.render', { component: 'Pane', requestId: 'multiplayer' }, async ($, e) => {

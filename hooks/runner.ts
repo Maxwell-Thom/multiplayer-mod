@@ -56,7 +56,7 @@ const PARENT_PS = '(Get-CimInstance Win32_Process -Filter "ProcessId=$((Get-CimI
 const PARENT_SH = 'readlink "/proc/$PPID/exe" 2>/dev/null; ps -o comm= -p "$PPID" 2>/dev/null; command -v claude 2>/dev/null'
 
 export const EMPTY_VIEW: MultiplayerView = {
-  isSignedIn: false, space: '', code: '', link: '', me: '', status: 'not signed in', people: [], turns: [], approval: null,
+  isSignedIn: false, space: '', code: '', link: '', me: '', status: 'not signed in', needsYou: false, people: [], turns: [], approval: null,
 }
 
 export type Decision = 'allow-once' | 'allow-always' | 'deny'
@@ -1855,6 +1855,19 @@ export class Runner {
     return 'connected'
   }
 
+  /** The status needs the person (it's in the same order): an approval, their turn held up, turns not running here. */
+  private needsYou(): boolean {
+    const a = this.active
+    if (this.phase === 'signed-out' || this.phase === 'superseded') return true
+    if (a && a.approvals.size > 0) return true
+    if (a && !a.stopped) return false
+    if (this.combine) return false
+    if (this.queue[0]) return this.busy
+    if (this.paused || this.phase !== 'online') return false
+    const me = this.state?.members[this.me]
+    return !!(me?.limit && (!me.limit.until || me.limit.until > Date.now()))
+  }
+
   view(): MultiplayerView {
     const s = this.state
     const ses = this.session
@@ -1880,6 +1893,7 @@ export class Runner {
       link: webLink(ses),
       me: s ? memberName(s, this.me) : ses.name,
       status: this.statusDetail(),
+      needsYou: this.needsYou(),
       people,
       turns,
       approval: pending ? { tool: pending.tool, title: pending.title } : null,
@@ -1890,7 +1904,9 @@ export class Runner {
   refresh(): void {
     if (!this.io) return
     const ses = this.session
-    const status = ses ? `Multiplayer · ${this.state?.space.name ?? ses.spaceName ?? 'space'} · ${this.statusDetail()}` : undefined
+    // Claude Code draws a plugin's status line as a warning, after the plugin's name. So it's kept
+    // for what needs the person; the steady state is a dim label in the prompt footer (register.tsx).
+    const status = ses && this.needsYou() ? `${this.state?.space.name ?? ses.spaceName ?? 'space'} · ${this.statusDetail()}` : undefined
     if (status !== this.lastStatus) {
       this.lastStatus = status
       void soft(() => this.io.status(status))

@@ -28,6 +28,8 @@ export type MultiplayerView = {
   me: string
   /** The status line's last part: "running Sam's turn", "paused", ... */
   status: string
+  /** The status needs the person (an approval, their turn held up): it's a warning line under the prompt, else a dim footer label. */
+  needsYou: boolean
   people: MultiplayerPerson[]
   turns: MultiplayerTurnRow[]
   /** An approval this runner is waiting on, if any. */
