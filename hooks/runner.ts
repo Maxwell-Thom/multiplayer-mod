@@ -126,6 +126,8 @@ type WorkEntry = {
   turnId: string
   spaceId: string
   at: number
+  /** What `files` are relative to: the repository's root (or the folder, outside git). */
+  root: string
   files: string[]
   commits: { sha: string; subject: string }[]
   pushed?: string
@@ -136,6 +138,10 @@ type WorkEntry = {
 /** Each folder's WorkEntry list, by folder. */
 const STORE_WORK = 'work'
 const EDIT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit'])
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f\u2028\u2029]/
+// eslint-disable-next-line no-control-regex
+const CONTROL_ALL = /[\u0000-\u001f\u007f\u2028\u2029]/g
 const workPending = (e: WorkEntry) => !!e.noRepo || e.files.length > 0 || (e.commits.length > 0 && !e.pushed)
 
 type Job =
@@ -975,18 +981,21 @@ export class Runner {
   private workReport(e: WorkEntry): Omit<TurnWork, 'at'> {
     const named: string[] = []
     let more = 0
+    const root = (e.root || this.cwd).replace(/\\/g, '/').replace(/\/+$/, '')
     for (const f of e.files) {
-      // Named only where reading it would be: not a secret (a key, a .env), not outside the folder.
-      if (named.length >= WORK_FILES_MAX || f.length > 300 || privateSource('Read', { file_path: f }, this.cwd)) more++
+      // Named only where reading it would be: inside this folder (git's paths are the repository's,
+      // which may be bigger), not a secret (a key, a .env), and a plain one-line name.
+      if (named.length >= WORK_FILES_MAX || f.length > 300 || CONTROL.test(f) || privateSource('Read', { file_path: `${root}/${f}` }, this.cwd)) more++
       else named.push(f)
     }
-    const commits = e.commits.slice(0, WORK_COMMITS_MAX).map((c) => ({ sha: c.sha.slice(0, 12), subject: c.subject.slice(0, 300) }))
+    const commits = e.commits.slice(0, WORK_COMMITS_MAX).map((c) => ({ sha: c.sha.slice(0, 12), subject: c.subject.replace(CONTROL_ALL, ' ').slice(0, 300) }))
+    const pushed = e.pushed && /^[A-Za-z0-9._/-]{1,200}$/.test(e.pushed) ? e.pushed : undefined
     return {
       ...(e.noRepo ? { noRepo: true } : {}),
       ...(named.length ? { uncommitted: named } : {}),
       ...(more ? { more } : {}),
       ...(commits.length ? { commits } : {}),
-      ...(e.pushed && commits.length ? { pushed: e.pushed.slice(0, 200) } : {}),
+      ...(pushed && commits.length ? { pushed } : {}),
     }
   }
 
@@ -999,11 +1008,11 @@ export class Runner {
       // Not a git repository: the files Claude's steps edited, inside this folder.
       const files = [...new Set([...a.touched].filter((p) => insideFolder(p, this.cwd)).map((p) => fmt.sharePath(p, this.cwd)))]
       if (!files.length) return
-      e = { turnId: a.turnId, spaceId: a.spaceId, at: Date.now(), files, commits: [], noRepo: true, sent: '' }
+      e = { turnId: a.turnId, spaceId: a.spaceId, at: Date.now(), root: this.cwd, files, commits: [], noRepo: true, sent: '' }
     } else {
       const end = await soft(() => G.workEnd(this.io, start))
       if (!end) return
-      e = { turnId: a.turnId, spaceId: a.spaceId, at: Date.now(), files: end.uncommitted, commits: end.commits, ...(end.pushed ? { pushed: end.pushed } : {}), sent: '' }
+      e = { turnId: a.turnId, spaceId: a.spaceId, at: Date.now(), root: start.root, files: end.uncommitted, commits: end.commits, ...(end.pushed ? { pushed: end.pushed } : {}), sent: '' }
     }
     const report = this.workReport(e)
     if (!report.noRepo && !report.uncommitted && !report.more && !report.commits) return

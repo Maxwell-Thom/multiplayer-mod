@@ -170,7 +170,7 @@ const count = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 export function workFiles(w: TurnWork, max = 3): string {
   const named = w.uncommitted ?? [];
   const extra = Math.max(0, named.length - max) + (w.more ?? 0);
-  return [named.slice(0, max).join(', '), extra ? `${extra} more` : ''].filter(Boolean).join(' and ');
+  return [named.slice(0, max).map((f) => clip(f, 120)).join(', '), extra ? `${extra} more` : ''].filter(Boolean).join(' and ');
 }
 
 /** One short line on where a turn's changes are, for people ("your computer" for its runner). */

@@ -89,6 +89,8 @@ export function isId(v: unknown): v is string {
 }
 
 const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v);
+// eslint-disable-next-line no-control-regex
+const CONTROL = /[\u0000-\u001f\u007f\u2028\u2029]/;
 
 function checkField(v: unknown, spec: string): boolean {
   const optional = spec.endsWith('?');
@@ -143,11 +145,14 @@ export function invalid(cmd: unknown): string | null {
     const known = ['noRepo', 'uncommitted', 'more', 'commits', 'pushed'];
     if (Object.keys(w).some((k) => !known.includes(k))) return 'Bad work.';
     if (w.noRepo !== undefined && typeof w.noRepo !== 'boolean') return 'Bad work.';
-    if (w.uncommitted !== undefined && (!Array.isArray(w.uncommitted) || w.uncommitted.length > WORK_FILES_MAX || !w.uncommitted.every((f) => typeof f === 'string' && f.length > 0 && f.length <= 300))) return 'Bad work.';
+    // These reach other people's Claude: no control characters (a newline could pass for a note of the space's own).
+    const line = (v: unknown, max: number) => typeof v === 'string' && v.length > 0 && v.length <= max && !CONTROL.test(v);
+    if (w.uncommitted !== undefined && (!Array.isArray(w.uncommitted) || w.uncommitted.length > WORK_FILES_MAX || !w.uncommitted.every((f) => line(f, 300)))) return 'Bad work.';
     if (w.more !== undefined && (typeof w.more !== 'number' || !Number.isInteger(w.more) || w.more < 0 || w.more > 1_000_000)) return 'Bad work.';
     if (w.commits !== undefined && (!Array.isArray(w.commits) || w.commits.length > WORK_COMMITS_MAX
-      || !w.commits.every((x) => isObj(x) && typeof x.sha === 'string' && /^[0-9a-f]{7,64}$/.test(x.sha) && typeof x.subject === 'string' && x.subject.length <= 300))) return 'Bad work.';
-    if (w.pushed !== undefined && (typeof w.pushed !== 'string' || !w.pushed || w.pushed.length > 200)) return 'Bad work.';
+      || !w.commits.every((x) => isObj(x) && typeof x.sha === 'string' && /^[0-9a-f]{7,64}$/.test(x.sha) && typeof x.subject === 'string' && x.subject.length <= 300 && !CONTROL.test(x.subject)))) return 'Bad work.';
+    // A git branch name's characters only.
+    if (w.pushed !== undefined && (typeof w.pushed !== 'string' || !/^[A-Za-z0-9._/-]{1,200}$/.test(w.pushed))) return 'Bad work.';
   }
   if (cmd.type === 'merge.complete' && !Object.values(c.picks as object).every((v) => typeof v === 'boolean')) return 'Bad picks.';
   // A pinned model goes to Claude Code's --model on the runner's machine.
