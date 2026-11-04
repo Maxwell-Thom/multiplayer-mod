@@ -212,7 +212,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const original = cmd.editOf ? s.turns[cmd.editOf] : undefined;
       if (cmd.editParts && original) {
         // A reveal's positions are shown without names: an edit must not put them back.
-        if (original.mode === 'reveal') return fail('Positions shown in a reveal can’t be edited.');
+        if (original.mode === 'reveal') return fail('Opinions shown after Claude’s answer can’t be edited.');
         // Each person's part stays theirs; one someone else changed says who changed it.
         const authors = new Set<string>([...original.parts.map((p) => p.memberId), actor]);
         if (cmd.editParts.some((p) => !authors.has(p.memberId))) return fail('An edit keeps the turn’s own authors.');
@@ -332,8 +332,8 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!parts.length) return fail('Nothing to send yet.');
       const mode = cmd.mode === 'view-first' ? 'view-first' : 'normal';
       if (mode === 'view-first') {
-        if (!parts.some((p) => p.position)) return fail('Mark at least one part as a position to hold back.');
-        if (!parts.some((p) => !p.position)) return fail('Add the question first: switch off Claude’s view first and write what you’re asking. Positions stay hidden until Claude has answered it.');
+        if (!parts.some((p) => p.position)) return fail('Add at least one opinion to hide.');
+        if (!parts.some((p) => !p.position)) return fail('Add the question first: turn off Hide opinions and write what you’re asking.');
       }
       const out: EventBody[] = [];
       if (b.state === 'parked') {
@@ -410,7 +410,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
     case 'turn.reveal': {
       const deny = needWrite(); if (deny) return deny;
       const t = s.turns[cmd.turnId];
-      if (!seesTurn(t) || t.mode !== 'view-first' || t.status !== 'done') return fail('Positions are shown after Claude’s first answer.');
+      if (!seesTurn(t) || t.mode !== 'view-first' || t.status !== 'done') return fail('Opinions are shown after Claude’s first answer.');
       if (Object.values(s.turns).some((x) => x.revealOf === t.id && x.status !== 'failed' && x.status !== 'stopped')) return fail('Already shown.');
       const b = branchOk(t.branchId); if (isDecided(b)) return b;
       const busy = activeTurn(s, b.id);
