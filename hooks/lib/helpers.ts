@@ -279,6 +279,12 @@ export function approvalCard(tool: string, input: Record<string, unknown>): { ti
       return qs ? { title: 'Answer Claude’s question', detail: qs.map((q) => q.question).join('\n') } : { title: 'Answer Claude’s question', detail: '' };
     }
     case 'ExitPlanMode': return { title: 'Approve Claude’s plan', detail: '' };
+    // A file Claude made, handed to everyone in the space (they can download it).
+    case 'mcp__multiplayer__share_file': {
+      const p = str(input.path);
+      const n = str(input.name) || p.split(/[\\/]/).pop() || 'a file';
+      return { title: `Share ${clip(n, 80)} with everyone here`, detail: p };
+    }
     // Claude Code's artifact tools, made in the person's own Claude Code (BRIDGED_TOOLS).
     case 'mcp__multiplayer__Artifact': case 'mcp__multiplayer__ArtifactData': case 'mcp__multiplayer__ArtifactComments': {
       // The action and every field that picks what it touches, as they are: never a title Claude chose in their place.
@@ -344,4 +350,27 @@ export function chunkImport<T extends ImportTurn>(turns: T[], o: { maxTurns?: nu
   }
   if (cur.length) chunks.push(cur);
   return { chunks, shortened };
+}
+
+const FILE_TYPES: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', svg: 'image/svg+xml',
+  pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', tsv: 'text/tab-separated-values', json: 'application/json',
+  html: 'text/html', htm: 'text/html', xml: 'application/xml', yaml: 'application/yaml', yml: 'application/yaml',
+  docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  zip: 'application/zip', mp3: 'audio/mpeg', wav: 'audio/wav', mp4: 'video/mp4', mov: 'video/quicktime',
+};
+
+/** A file's media type from its name, for a file Claude made (the browser says for uploads). */
+export function fileType(name: string): string {
+  const ext = /\.([a-z0-9]+)$/i.exec(name)?.[1]?.toLowerCase() ?? '';
+  return FILE_TYPES[ext] ?? 'application/octet-stream';
+}
+
+/** "820 B", "14 KB", "3.2 MB". */
+export function fmtSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1048576).toFixed(bytes < 10 * 1048576 ? 1 : 0)} MB`;
 }

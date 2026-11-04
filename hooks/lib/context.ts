@@ -21,6 +21,15 @@ export interface ContextOptions {
   maxHistoryChars?: number;
 }
 
+/**
+ * Files on a part or a turn, by name and id: the runner lists where each one is on its computer,
+ * so Claude can read it (`[attached: chart.png (file f_1)]`).
+ */
+export function filesLine(s: SpaceState, ids: readonly Id[] | undefined, verb = 'attached'): string {
+  const list = (ids ?? []).map((id) => s.files?.[id]).filter((x): x is NonNullable<typeof x> => !!x);
+  return list.length ? ` [${verb}: ${list.map((x) => `${x.name} (file ${x.id})`).join(', ')}]` : '';
+}
+
 function partsText(s: SpaceState, t: Turn, withPositions: boolean): string {
   const parts = t.parts.filter((p) => withPositions || !p.position);
   const authors = new Set(parts.map((p) => p.memberId));
@@ -34,8 +43,8 @@ function partsText(s: SpaceState, t: Turn, withPositions: boolean): string {
   if (authors.size === 1 && parts.length === 1 && /^\/[A-Za-z][\w:-]*(\s|$)/.test(parts[0].text.trim())) {
     return `${who(parts[0])} runs this command:\n\n${parts[0].text.trim()}`;
   }
-  if (authors.size === 1 && parts.length === 1) return `${who(parts[0])}: ${parts[0].text}`;
-  return parts.map((p) => `${who(p)}: ${p.text}`).join('\n\n');
+  if (authors.size === 1 && parts.length === 1) return `${who(parts[0])}: ${parts[0].text}${filesLine(s, parts[0].files)}`;
+  return parts.map((p) => `${who(p)}: ${p.text}${filesLine(s, p.files)}`).join('\n\n');
 }
 
 function turnTranscript(s: SpaceState, t: Turn, maxAnswer: number): string {
@@ -263,7 +272,7 @@ function fullTurn(s: SpaceState, t: Turn, nested = false): string {
     : partsText(s, t, t.mode !== 'view-first');
   const own = t.steps.filter((x) => x.under === undefined);
   const steps = own.length ? `\n[Claude used ${own.length} step${own.length === 1 ? '' : 's'}: ${own.map((x) => x.text).join('; ')}]` : '';
-  const answer = t.status === 'done' ? t.text : t.status === 'stopped' ? `${t.text} [stopped]` : `[${t.status}]`;
+  const answer = (t.status === 'done' ? t.text : t.status === 'stopped' ? `${t.text} [stopped]` : `[${t.status}]`) + filesLine(s, t.files, 'shared with everyone');
   // A turn that cites another brings it along (one level deep), so every session reads what it read.
   const cited = nested ? [] : citedTurns(s, t).map((c) => `(${memberName(s, c.by)} cited this turn from ${c.where}:)\n${fullTurn(s, c.turn, true)}`);
   // A turn brought in happened in that person's own conversation elsewhere, before it came here.

@@ -23,12 +23,13 @@ import * as G from './git.ts'
 import type { Command } from './lib/commands.ts'
 import { buildSessionTurn, parseReplies } from './lib/context.ts'
 import type { FilesAction, FilesReport, SpaceEvent } from './lib/events.ts'
-import { type AskQuestion, clip, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName } from './lib/helpers.ts'
+import { type AskQuestion, clip, fileType, fmtSize, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName } from './lib/helpers.ts'
 import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './transcript.ts'
 import { apply } from './lib/reduce.ts'
 import { privateSource, privateStepText } from './lib/privacy.ts'
 import type { Port } from './port.ts'
 import type { Branch, MemberId, Presence, RunnerInfo, SpaceState, Step, Turn, TurnFailure, TurnMode, Usage } from './lib/types.ts'
+import { FILE_MAX_BYTES } from './lib/types.ts'
 import { BRIDGED_TOOLS, type CommandResponse, type RunnerHello, type RunnerInbound } from './lib/wire.ts'
 
 export const PLUGIN = 'multiplayer'
@@ -529,6 +530,8 @@ export class Runner {
     const answer = (text: string, isError?: boolean) => void soft(() => this.wire!.live({ kind: 'tool.result', requestId: m.requestId, text, ...(isError ? { isError: true } : {}) }))
     if (!this.wire) return
     if (this.active?.turnId !== m.turnId) return answer('That shared turn isn’t running here.', true)
+    // Claude hands a file it made to everyone in the space.
+    if (m.tool === 'share_file') { const [text, isError] = await this.shareFile(m); return answer(text, isError) }
     if (!(BRIDGED_TOOLS as readonly string[]).includes(m.tool) || !this.io.callTool) return answer(`${m.tool} isn’t available here.`, true)
     try {
       const r = await this.io.callTool(m.tool, m.input, m.approved === true)
@@ -536,6 +539,60 @@ export class Runner {
     } catch (err) {
       answer(`${m.tool} failed: ${(err as Error).message}`, true)
     }
+  }
+
+  /** Reads a file of this computer's and puts it into the space, from the shared turn running here. */
+  private async shareFile(m: Extract<RunnerInbound, { kind: 'tool.request' }>): Promise<[string, boolean?]> {
+    const a = this.active
+    const t = this.turn(m.turnId)
+    const w = a?.wire ?? this.wire
+    if (!a || !t || !w || !this.io.readBytes) return ['Sharing a file isn’t available here.', true]
+    const raw = typeof m.input.path === 'string' ? m.input.path.trim() : ''
+    if (!raw) return ['Give the file’s path.', true]
+    const path = /^([a-z]:)?[\\/]/i.test(raw) ? raw : `${this.cwd}/${raw}`
+    const name = (typeof m.input.name === 'string' && m.input.name.trim()) || raw.split(/[\\/]/).pop() || 'file'
+    let base64: string
+    try { base64 = await this.io.readBytes(path) } catch (err) { return [`Couldn’t read ${raw}: ${(err as Error).message}`, true] }
+    const size = Math.floor((base64.length * 3) / 4)
+    if (size > FILE_MAX_BYTES) return [`${name} is ${(size / 1048576).toFixed(1)} MB; a shared file can be up to ${FILE_MAX_BYTES / 1048576} MB.`, true]
+    try {
+      const f = await w.upload({ branchId: t.branchId, name, turnId: t.id, from: 'claude' }, base64, fileType(name))
+      return [`Shared ${f.name} (${fmtSize(f.size)}) with everyone in the space: they can download it under your answer. Say in your answer what it is.`]
+    } catch (err) {
+      return [`Couldn’t share ${name}: ${(err as Error).message}`, true]
+    }
+  }
+
+  /**
+   * The files of this conversation (attached to its prompts, shared from its answers), saved in
+   * `.multiplayer/files/` in this folder (kept out of git) so Claude reads them with its own tools:
+   * images and PDFs as Claude Code's Read shows them, documents with its skills. Fetched once each,
+   * with a short link (curl), since the engine writes only text. The note says where each one is.
+   */
+  private async fetchFiles(s: SpaceState, t: Turn, w: Wire): Promise<string> {
+    const ids: string[] = []
+    for (const x of [...historyTurns(s, t.branchId).filter((h) => h.id !== t.id), t]) {
+      for (const p of x.parts) for (const id of p.files ?? []) if (!ids.includes(id)) ids.push(id)
+      for (const id of x.files ?? []) if (!ids.includes(id)) ids.push(id)
+    }
+    const known = ids.map((id) => s.files?.[id]).filter((f): f is NonNullable<typeof f> => !!f)
+    if (!known.length) return ''
+    const dir = `${this.cwd}/.multiplayer`
+    await soft(() => this.io.write(`${dir}/.gitignore`, '# Multiplayer keeps files people share here. Not for git.\n*\n'))
+    const lines: string[] = []
+    for (const f of known.slice(-50)) {
+      const safe = f.name.replace(/[^\w.\- ]+/g, '_').replace(/^\.+/, '_').slice(0, 120) || 'file'
+      const rel = `.multiplayer/files/${f.id}/${safe}`
+      const who = f.from === 'claude' ? `shared by Claude in ${memberName(s, f.by)}'s turn` : `from ${memberName(s, f.by)}`
+      const have = (await soft(() => this.io.list(`${dir}/files/${f.id}`)))?.some((e) => e.name === safe)
+      if (!have) {
+        const url = await soft(() => w.fileLink(f.id))
+        const r = url ? await soft(() => this.io.run(['curl', '-sSfL', '--create-dirs', '--max-time', '120', '-o', `${dir}/files/${f.id}/${safe}`, url], { timeoutMs: 130_000 })) : undefined
+        if (!r || r.exitCode !== 0) { lines.push(`- ${f.name} (${who}): couldn't be fetched to this computer`); continue }
+      }
+      lines.push(`- ${f.name} (${who}, ${fmtSize(f.size)}): ${rel}`)
+    }
+    return `\n\n[Multiplayer] Files in this conversation, saved in this folder. Read the ones the prompt is about with your tools (Read shows images and PDFs; use your skills for Word, Excel and PowerPoint):\n${lines.join('\n')}`
   }
 
   async helloInfo(): Promise<RunnerHello['info']> {
@@ -988,7 +1045,9 @@ export class Runner {
     let rate: Extract<RunEvent, { kind: 'rate' }> | undefined
     let errText = ''
     try {
-      const it = io.spawn({ argv, cwd: this.cwd, env, input: st.message })[Symbol.asyncIterator]()
+      // Files people attached or Claude shared in this conversation, fetched into the folder to read.
+      const files = await this.fetchFiles(s, t, w)
+      const it = io.spawn({ argv, cwd: this.cwd, env, input: st.message + files })[Symbol.asyncIterator]()
       a.kill = () => { void soft(() => it.return?.()) }
       if (a.stopped) a.kill()
       for (;;) {

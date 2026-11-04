@@ -130,6 +130,21 @@ export class Wire {
   }
 
   /** This Claude Code is closing: its turns end now. Never throws. */
+  /** Puts a file into the space (a shared turn's file Claude made): its bytes as base64. */
+  async upload(q: { branchId: string; name: string; turnId?: string; from: 'claude' | 'upload' }, base64: string, type: string): Promise<{ id: string; name: string; size: number }> {
+    const qs = new URLSearchParams({ branchId: q.branchId, name: q.name, from: q.from, ...(q.turnId ? { turnId: q.turnId } : {}) })
+    const res = await this.fetch(`${this.base}/files?${qs}`, { method: 'POST', headers: { authorization: `Bearer ${this.token}`, 'content-type': 'text/plain', 'x-file-encoding': 'base64', 'x-file-type': type }, body: base64 })
+    let data: { ok?: boolean; error?: string; file?: { id: string; name: string; size: number } } | undefined
+    try { data = JSON.parse(res.text) } catch { data = undefined }
+    if (res.status >= 400 || !data?.file) throw new HttpError(data?.error || `HTTP ${res.status}`, res.status)
+    return data.file
+  }
+
+  /** A ten-minute link to a file, that works without signing in (for curl). */
+  async fileLink(fileId: string): Promise<string> {
+    return (await call<{ url: string }>(this.fetch, `${this.base}/files/${encodeURIComponent(fileId)}/link`, 'POST', this.token)).url
+  }
+
   async bye(): Promise<void> {
     try {
       await call(this.fetch, `${this.base}/runner/bye`, 'POST', this.token, { session: this.runnerSession })

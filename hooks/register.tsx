@@ -135,6 +135,11 @@ export const register: Register = (on, options) => {
         return t
       },
       write: (path, text) => $.fs.write(path, text),
+      readBytes: async (path) => {
+        const r = await $.fs.read(path, { as: 'bytes' })
+        if (typeof r === 'string' || !r || typeof r.base64 !== 'string') throw new Error(`${path} couldn't be read`)
+        return r.base64
+      },
       list: async (path) => (await $.fs.list(path)).map((x) => ({ name: x.name, kind: x.kind, size: x.size, mtimeMs: x.mtimeMs })),
       configDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
       listTools: async () => (await $.tool.list()).map((t) => ({ name: t.name, description: t.description })),
