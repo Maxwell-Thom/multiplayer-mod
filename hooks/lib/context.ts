@@ -34,6 +34,8 @@ function partsText(s: SpaceState, t: Turn, withPositions: boolean): string {
   const parts = t.parts.filter((p) => withPositions || !p.position);
   const authors = new Set(parts.map((p) => p.memberId));
   const who = (p: Turn['parts'][number]) => {
+    // A turn a schedule sent: its person set it up earlier; nobody typed it just now.
+    if (t.scheduled) return `${memberName(s, p.memberId)} (scheduled earlier, running now)`;
     const cited = p.cites ? s.turns[p.cites] : undefined;
     const from = cited ? s.branches[cited.branchId] : undefined;
     return `${memberName(s, p.memberId)}${p.editedBy ? ` (edited by ${memberName(s, p.editedBy)})` : ''}${cited ? ` (citing a turn from ${from && isMain(s, from.id) ? 'the main line' : `the branch “${from?.name ?? '?'}”`}, given above)` : ''}`;

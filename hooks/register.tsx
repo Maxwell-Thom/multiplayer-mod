@@ -59,11 +59,16 @@ export const register: Register = (on, options) => {
   // Exactly the call allowed: the tool and its input (keys in order), never just the tool.
   const callKey = (tool: string, input: unknown) => `${tool}\u0000${canonical(input)}`
 
+  /** Claude Code's own ways of doing things later: they'd end with a turn's session. */
+  const BACKGROUND = new Set(['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'RemoteTrigger'])
   /** In a shared turn's session: where to ask what its person shares in this space (docs/PRIVACY.md). */
   let sharedUrl = ''
 
   on('tool.check', async ($, e, next) => {
     const r = await next(e)
+    // Background work in a turn's session ends with the turn: the space keeps it instead, so its
+    // runs are turns everyone (and every later session) reads.
+    if (child && BACKGROUND.has(e.tool)) return { decision: 'deny', reason: `In a Multiplayer turn, this session ends when the turn does, so ${e.tool} would stop with it. Use mcp__multiplayer__schedule instead: each run is a new turn on this branch, everyone sees it and what it finds. (A watch on a command: check it on a schedule.)` }
     // Something from the person's own world that would run without asking (an allow rule, auto
     // mode), in a turn others read: unless they share it here, ask, so the share card comes up.
     if (child === 'shared' && sharedUrl && r.decision === 'allow') {

@@ -775,8 +775,11 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
     }
     case 'runner.schedule': {
       // Claude asked for work later in a turn this runner runs: kept by the space, shown to everyone.
+      const deny = needWrite(); if (deny) return deny;
       const t = s.turns[cmd.turnId];
       if (!t || t.runnerId !== actor || !isActive(t)) return fail('Set up work for later from a turn you’re running.', 'forbidden');
+      // A side question or recap is private, but a schedule shows on its branch: only from a private lane.
+      if (isOneOff(t) || (t.private && !s.branches[t.branchId]?.private)) return fail('Set up work for later from a turn on the branch, not a side question.');
       const prompt = cmd.prompt.trim();
       if (!prompt) return fail('Say what to do then.');
       const ok_ms = (v: number | undefined) => v === undefined || (Number.isFinite(v) && v >= SCHEDULE_MIN_MS && v <= SCHEDULE_MAX_MS);
@@ -804,19 +807,23 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!x || x.status !== 'on' || x.next > ctx.now) return fail('Not due.', 'state');
       const b = s.branches[x.branchId];
       const runner = s.members[x.by];
-      // Its branch or its person gone: it stops, saying so.
-      if (!b || b.state === 'merged' || !runner || runner.leftAt) return ok({ type: 'schedule.updated', scheduleId: x.id, patch: { status: 'off', stoppedBy: 'server' } });
+      // Its branch, its person, or their right to prompt there gone: it stops, saying so.
+      const writes = !!runner && (runner.role === 'host' || runner.role === 'prompter');
+      if (!b || b.state === 'merged' || !runner || runner.leftAt || !writes || !canSee(s, x.by, b.id)) return ok({ type: 'schedule.updated', scheduleId: x.id, patch: { status: 'off', stoppedBy: 'server' } });
       // One turn at a time on a branch: it waits for the running one.
       if (activeTurn(s, b.id)) return fail('Busy.', 'busy');
+      // Someone else's branch with "owner OKs first": it waits for their OK, as a turn sent by hand would.
+      const needsOk = !!b.ownerId && b.ownerId !== x.by && !b.private && s.space.policy.ownerOk && !s.members[b.ownerId]?.leftAt;
       const turn: Turn = {
         id: ctx.id('t'), branchId: b.id, conversationId: b.conversationId, parts: [{ memberId: x.by, text: x.prompt }], senderId: x.by, runnerId: x.by,
-        mode: 'normal', status: 'requested', requestedAt: ctx.now, steps: [], text: '', model: b.model.name, private: b.private || undefined, scheduled: x.id,
+        mode: 'normal', status: needsOk ? 'held' : 'requested', requestedAt: ctx.now, steps: [], text: '', model: b.model.name, private: b.private || undefined, scheduled: x.id,
       };
       const left = x.left !== undefined ? x.left - 1 : undefined;
       const again = x.everyMs !== undefined && (left === undefined || left > 0);
       const out: EventBody[] = [];
       if (b.state === 'parked') out.push({ type: 'branch.updated', branchId: b.id, patch: { state: 'active' } });
       out.push({ type: 'turn.requested', turn, consumed: [] });
+      if (needsOk) out.push({ type: 'ask.created', ask: { id: ctx.id('a'), kind: 'send-in-branch', from: x.by, to: b.ownerId!, branchId: b.id, turnId: turn.id, status: 'open', at: ctx.now } });
       out.push({ type: 'schedule.updated', scheduleId: x.id, patch: again ? { next: Math.max(x.next + x.everyMs!, ctx.now + SCHEDULE_MIN_MS), lastTurn: turn.id, ...(left !== undefined ? { left } : {}) } : { status: 'off', lastTurn: turn.id, ...(left !== undefined ? { left } : {}) } });
       return ok(...out);
     }

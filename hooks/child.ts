@@ -76,6 +76,8 @@ export function cleanName(s: string): string {
 export const TOOL_APPROVE = 'mcp__multiplayer__approve'
 export const TOOL_DECISION = 'mcp__multiplayer__propose_decision'
 export const TOOL_QUESTION = 'mcp__multiplayer__add_question'
+/** Looking at and stopping what's set up for later is harmless; setting it up asks (it runs on the person's plan). */
+export const TOOL_SCHEDULE_LOOK = ['mcp__multiplayer__list_schedules', 'mcp__multiplayer__stop_schedule']
 
 /** Claude Code's arguments for one turn of a branch session (the prompt goes on standard input). */
 export function childArgs(o: ChildOptions): string[] {
@@ -83,7 +85,7 @@ export function childArgs(o: ChildOptions): string[] {
     : o.plan.kind === 'resume' ? ['--resume', o.plan.id]
     : ['--resume', o.plan.from, '--fork-session', ...(o.plan.at ? ['--resume-session-at', o.plan.at] : [])]
   // Only plain hostnames become rules: anything else could add a rule of its own to the list.
-  const allowed = [TOOL_DECISION, TOOL_QUESTION, ...o.sites.filter(isSite).map((s) => `WebFetch(domain:${s})`)]
+  const allowed = [TOOL_DECISION, TOOL_QUESTION, ...TOOL_SCHEDULE_LOOK, ...o.sites.filter(isSite).map((s) => `WebFetch(domain:${s})`)]
   return [
     '-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     ...session,

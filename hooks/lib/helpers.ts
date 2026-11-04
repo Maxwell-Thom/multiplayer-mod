@@ -279,6 +279,13 @@ export function approvalCard(tool: string, input: Record<string, unknown>): { ti
       return qs ? { title: 'Answer Claude’s question', detail: qs.map((q) => q.question).join('\n') } : { title: 'Answer Claude’s question', detail: '' };
     }
     case 'ExitPlanMode': return { title: 'Approve Claude’s plan', detail: '' };
+    // Work for later, on the runner's plan: say what and when, plainly.
+    case 'mcp__multiplayer__schedule': {
+      const every = typeof input.every_minutes === 'number' ? input.every_minutes : undefined;
+      const inM = typeof input.in_minutes === 'number' ? input.in_minutes : undefined;
+      const when = every !== undefined ? `every ${every} min${typeof input.times === 'number' ? `, ${input.times} times` : ''}` : inM !== undefined ? `in ${inM} min` : 'later';
+      return { title: `Run a prompt ${when}, on your plan`, detail: str(input.prompt) };
+    }
     // A file Claude made, handed to everyone in the space (they can download it).
     case 'mcp__multiplayer__share_file': {
       const p = str(input.path);
