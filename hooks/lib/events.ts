@@ -68,9 +68,11 @@ export type LiveMessage =
   | { kind: 'presence.gone'; memberId: MemberId }
   | { kind: 'runner'; runner: RunnerInfo }
   | { kind: 'delta'; turnId: Id; text: string }
-  /** Sent only to the member whose runner asks: the full request, for approving in the web app. */
-  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[]; plan?: string }
-  | { kind: 'approval.cleared'; turnId: Id; requestId: string }
+  /** Sent to the member whose runner asks (the full request, for approving in the web app); a shared one also to everyone who may answer it. */
+  /** `shared`: Claude's question or plan, which anyone here who may prompt can answer. */
+  | { kind: 'approval.request'; turnId: Id; requestId: string; tool: string; title: string; detail: string; site?: string; always?: string; questions?: AskQuestion[]; plan?: string; shared?: boolean }
+  /** `by`: who answered a shared one; `ok`: they approved or answered it. */
+  | { kind: 'approval.cleared'; turnId: Id; requestId: string; by?: MemberId; ok?: boolean }
   /** Web app → its own runner, relayed through the server. */
   | { kind: 'approval.answer'; turnId: Id; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny' }
   /** File work happens on each person's own machine: requests and reports go only between a person's web app and their runner. */
