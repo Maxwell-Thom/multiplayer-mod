@@ -13,6 +13,8 @@ export interface FolderView {
   has: string[];
   /** This folder isn't a git repository: it can't pull anyone's changes. */
   noRepo?: boolean;
+  /** The git branch this folder is on, to say when a push went to another one. */
+  branch?: string;
 }
 
 /** Who reads a turn, and from which folder (none: a claude.ai chat, which has no files). */
@@ -53,7 +55,9 @@ function standing(s: SpaceState, t: Turn, r: Reader): { text: string; missing: b
   const newest = w.commits?.[0];
   const commits = newest ? `${w.commits!.length === 1 ? 'commit' : `${w.commits!.length} commits, newest`} ${sha12(newest.sha)} “${clip(newest.subject, 80)}”` : '';
   const pushedHas = () => !f ? '' : here || f.has.includes(sha12(newest!.sha)) ? '; this folder has it'
-    : f.noRepo ? `; this folder doesn't have it (it isn't a git repository, so it can't pull)` : `; this folder doesn't have it yet (a pull would bring it)`;
+    : f.noRepo ? `; this folder doesn't have it (it isn't a git repository, so it can't pull)`
+    : f.branch && w.pushed && f.branch !== w.pushed ? `; this folder doesn't have it: this folder is on ${f.branch}, so pulling won't bring it (it needs ${w.pushed} fetched and merged, or checked out)`
+    : `; this folder doesn't have it yet (a pull would bring it)`;
   switch (workStatus(w)) {
     case 'no-repo':
       return here ? { text: `in this folder, which isn't a git repository`, missing: false }

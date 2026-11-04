@@ -1073,7 +1073,8 @@ export class Runner {
     const shas = [...new Set(named.map((t) => t.work!.commits![0].sha))].slice(-40)
     const since = Math.min(Date.now(), ...named.map((t) => t.startedAt ?? t.requestedAt))
     const has = shas.length ? (await soft(() => G.commitsHere(this.io, shas, since))) ?? [] : []
-    return { here, has }
+    const branch = shas.length ? await soft(() => G.currentBranch(this.io)) : undefined
+    return { here, has, ...(branch && branch !== 'HEAD' ? { branch } : {}) }
   }
 
   // ======================================================= branch sessions
@@ -1298,8 +1299,10 @@ export class Runner {
         await this.finishCommand({ type: 'runner.fail', turnId: a.turnId, failure }, w)
         if (failure.reason === 'limit') io.toast(`Multiplayer: limit reached while running ${a.label}${failure.resetsAt ? `; it resets ${when(failure.resetsAt)}` : ''}.`)
       }
-      // Stopped, failed or done: whatever it changed in this folder is there, so say so.
+      // Stopped, failed or done: whatever it changed in this folder is there, so say so. And
+      // earlier turns' changes may have just been committed or pushed by this one.
       await this.recordWork(a, w)
+      await this.recheckWork(true)
       await this.reportPush(a)
     } finally {
       this.ending.delete(a)

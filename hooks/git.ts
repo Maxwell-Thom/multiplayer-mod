@@ -36,6 +36,9 @@ async function branchName(sh: Shell): Promise<string | undefined> {
   return (await gitOk(sh, ['rev-parse', '--abbrev-ref', 'HEAD'])) ?? undefined
 }
 
+/** The git branch this folder is on ("HEAD" when detached). */
+export const currentBranch = branchName
+
 async function isDirty(sh: Shell): Promise<boolean> {
   const s = await gitOk(sh, ['status', '--porcelain', '--untracked-files=no'])
   return !!s
