@@ -29,6 +29,11 @@ function partsText(s: SpaceState, t: Turn, withPositions: boolean): string {
     const from = cited ? s.branches[cited.branchId] : undefined;
     return `${memberName(s, p.memberId)}${p.editedBy ? ` (edited by ${memberName(s, p.editedBy)})` : ''}${cited ? ` (citing a turn from ${from && isMain(s, from.id) ? 'the main line' : `the branch “${from?.name ?? '?'}”`}, given above)` : ''}`;
   };
+  // A slash command (a skill: `/review the login page`) sent on its own goes as the command
+  // itself, on its own last line, as Claude Code reads one; who sent it, just above.
+  if (authors.size === 1 && parts.length === 1 && /^\/[A-Za-z][\w:-]*(\s|$)/.test(parts[0].text.trim())) {
+    return `${who(parts[0])} runs this command:\n\n${parts[0].text.trim()}`;
+  }
   if (authors.size === 1 && parts.length === 1) return `${who(parts[0])}: ${parts[0].text}`;
   return parts.map((p) => `${who(p)}: ${p.text}`).join('\n\n');
 }
