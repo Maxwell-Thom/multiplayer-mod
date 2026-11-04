@@ -865,6 +865,9 @@ export class Runner {
       // Questions wait for a person; sessions this mod starts keep their transcripts.
       MCP_TOOL_TIMEOUT: '900000',
       CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: '1',
+      // The skills the person enabled on claude.ai, as their own Claude Code has them: a `-p`
+      // run only waits for that list when asked to.
+      CLAUDE_CODE_SYNC_SKILLS: '1',
       // The project's setup leaves out the person's claude.ai connectors too.
       ...(projectSetup ? { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' } : {}),
     }
@@ -888,7 +891,7 @@ export class Runner {
         for (const ev of reader.push(n.value.text)) {
           if (ev.kind === 'init') { if (ev.sessionId) sessionId = ev.sessionId; if (ev.model) a.model = ev.model }
           else if (ev.kind === 'text') { a.live = ev.text; this.scheduleDelta(a) }
-          else if (ev.kind === 'tool') this.beginStep(a, ev.id, ev.name, ev.input)
+          else if (ev.kind === 'tool') this.beginStep(a, ev.id, ev.name, ev.input, ev.parent)
           else if (ev.kind === 'tool-result') this.endStep(a, ev.id, ev.isError ? (isRefusal(ev.text) ? 'denied' : 'fail') : 'done')
           else if (ev.kind === 'message') { lastUuid = ev.uuid; if (ev.model) a.model = ev.model }
           else if (ev.kind === 'rate') { if (ev.status === 'rejected') rate = ev }
@@ -1012,9 +1015,10 @@ export class Runner {
   }
 
   /** A tool call in the branch session: a `run` step now; its result's state later. */
-  private beginStep(a: Active, id: string, tool: string, input: Record<string, unknown>): void {
+  private beginStep(a: Active, id: string, tool: string, input: Record<string, unknown>, parent?: string): void {
     if (this.active !== a || a.stopped) return
-    const step: Step = { i: a.steps++, tool, text: fmt.describeTool(tool, input, this.cwd, this.home), state: 'run' }
+    const under = parent ? a.toolSteps.get(parent) : undefined
+    const step: Step = { i: a.steps++, tool, text: fmt.describeTool(tool, input, this.cwd, this.home), state: 'run', ...(under !== undefined ? { under } : {}) }
     a.stepText.set(step.i, step)
     a.toolSteps.set(id, step.i)
     a.current.set(tool, step.i)

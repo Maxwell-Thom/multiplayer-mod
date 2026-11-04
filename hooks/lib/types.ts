@@ -138,6 +138,8 @@ export interface Step {
   text: string;
   detail?: string;
   state: 'run' | 'done' | 'fail' | 'wait' | 'denied';
+  /** A step a subagent took: the `i` of the Agent step that started it. */
+  under?: number;
 }
 
 export interface Usage {

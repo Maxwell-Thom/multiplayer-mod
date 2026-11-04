@@ -111,7 +111,8 @@ export type RunEvent =
   | { kind: 'init'; sessionId: string; model: string }
   /** The text written so far, the part still streaming included. */
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; id: string; name: string; input: Record<string, unknown> }
+  /** `parent`: the Agent tool call whose subagent made this one. */
+  | { kind: 'tool'; id: string; name: string; input: Record<string, unknown>; parent?: string }
   | { kind: 'tool-result'; id: string; isError: boolean; text: string }
   /** An assistant message the session stored: a turn's last one is where a later fork starts. */
   | { kind: 'message'; uuid: string; model?: string }
@@ -169,7 +170,12 @@ export class StreamReader {
         return []
       }
       case 'assistant': {
-        if (sub) return []
+        // A subagent's text is its own (its result comes back to Claude as the Agent tool's
+        // result); its tool calls show, under the Agent step.
+        if (sub) {
+          const content = Array.isArray(obj(m.message).content) ? (obj(m.message).content as unknown[]) : []
+          return content.map(obj).filter((c) => c.type === 'tool_use').map((c) => ({ kind: 'tool' as const, id: str(c.id), name: str(c.name), input: obj(c.input), parent: str(m.parent_tool_use_id) }))
+        }
         const msg = obj(m.message)
         const out: RunEvent[] = []
         const content = Array.isArray(msg.content) ? msg.content : []
@@ -184,7 +190,7 @@ export class StreamReader {
         return out
       }
       case 'user': {
-        if (sub) return []
+        // A subagent's tool results end its steps too (its prompt and other text stay out).
         const content = Array.isArray(obj(m.message).content) ? (obj(m.message).content as unknown[]) : []
         const out: RunEvent[] = []
         for (const raw of content) {

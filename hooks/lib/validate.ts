@@ -109,6 +109,7 @@ export function invalid(cmd: unknown): string | null {
     const st = c.step as Record<string, unknown>;
     if (typeof st.i !== 'number' || typeof st.tool !== 'string' || typeof st.text !== 'string' || !['run', 'done', 'fail', 'wait', 'denied'].includes(st.state as string)) return 'Bad step.';
     if (st.tool.length > 100 || st.text.length > 2000 || (st.detail !== undefined && (typeof st.detail !== 'string' || st.detail.length > 20000))) return 'Step too long.';
+    if (st.under !== undefined && (typeof st.under !== 'number' || !Number.isInteger(st.under) || st.under < 0 || st.under >= st.i)) return 'Bad step.';
   }
   if (cmd.type === 'runner.fail') {
     const f = c.failure as Record<string, unknown>;

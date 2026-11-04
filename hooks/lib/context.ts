@@ -38,7 +38,9 @@ function turnTranscript(s: SpaceState, t: Turn, maxAnswer: number): string {
   const who = t.mode === 'merge-note' ? 'Merge note'
     : t.mode === 'reveal' ? `Positions people held back (unattributed):\n${t.parts.map((p, i) => `${i + 1}. ${p.text}`).join('\n')}`
     : partsText(s, t, t.mode !== 'view-first');
-  const steps = t.steps.length ? `\n[Claude used ${t.steps.length} step${t.steps.length === 1 ? '' : 's'}: ${t.steps.slice(0, 6).map((x) => x.text).join('; ')}${t.steps.length > 6 ? '; …' : ''}]` : '';
+  // A subagent's own steps stay under its Agent step: the summary names Claude's.
+  const own = t.steps.filter((x) => x.under === undefined);
+  const steps = own.length ? `\n[Claude used ${own.length} step${own.length === 1 ? '' : 's'}: ${own.slice(0, 6).map((x) => x.text).join('; ')}${own.length > 6 ? '; …' : ''}]` : '';
   const answer = t.status === 'done' ? clip(t.text, maxAnswer) : t.status === 'stopped' ? `${clip(t.text, maxAnswer)} [stopped]` : `[${t.status}]`;
   return `${who}${steps}\nClaude (run by ${memberName(s, t.runnerId)}): ${answer}`;
 }
@@ -254,7 +256,8 @@ function fullTurn(s: SpaceState, t: Turn, nested = false): string {
   const who = t.mode === 'merge-note' ? 'Merge note'
     : t.mode === 'reveal' ? `Positions people held back (unattributed):\n${t.parts.map((p, i) => `${i + 1}. ${p.text}`).join('\n')}`
     : partsText(s, t, t.mode !== 'view-first');
-  const steps = t.steps.length ? `\n[Claude used ${t.steps.length} step${t.steps.length === 1 ? '' : 's'}: ${t.steps.map((x) => x.text).join('; ')}]` : '';
+  const own = t.steps.filter((x) => x.under === undefined);
+  const steps = own.length ? `\n[Claude used ${own.length} step${own.length === 1 ? '' : 's'}: ${own.map((x) => x.text).join('; ')}]` : '';
   const answer = t.status === 'done' ? t.text : t.status === 'stopped' ? `${t.text} [stopped]` : `[${t.status}]`;
   // A turn that cites another brings it along (one level deep), so every session reads what it read.
   const cited = nested ? [] : citedTurns(s, t).map((c) => `(${memberName(s, c.by)} cited this turn from ${c.where}:)\n${fullTurn(s, c.turn, true)}`);
