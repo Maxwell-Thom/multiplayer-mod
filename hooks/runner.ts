@@ -865,11 +865,10 @@ export class Runner {
       // Questions wait for a person; sessions this mod starts keep their transcripts.
       MCP_TOOL_TIMEOUT: '900000',
       CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: '1',
-      // The skills the person enabled on claude.ai, as their own Claude Code has them: a `-p`
-      // run only waits for that list when asked to.
-      CLAUDE_CODE_SYNC_SKILLS: '1',
-      // The project's setup leaves out the person's claude.ai connectors too.
-      ...(projectSetup ? { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' } : {}),
+      // The project's setup leaves out the person's claude.ai connectors too. Otherwise, the
+      // skills they enabled on claude.ai, as their own Claude Code has them: a `-p` run only
+      // waits for that list when asked to. (Their own setup's, never forced into the project's.)
+      ...(projectSetup ? { ENABLE_CLAUDEAI_MCP_SERVERS: 'false' } : { CLAUDE_CODE_SYNC_SKILLS: '1' }),
     }
     io.toast(`Multiplayer: running ${a.label} for you.`)
     this.refresh()
