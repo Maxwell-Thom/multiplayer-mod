@@ -314,6 +314,10 @@ export function approvalCard(tool: string, input: Record<string, unknown>): { ti
       return { title: 'Fetch a page', detail: url, site: siteOf(url) };
     }
     case 'Write': return { title: 'Write a file', detail: str(input.file_path) };
+    case 'Read': return { title: 'Read a file', detail: str(input.file_path) };
+    case 'NotebookEdit': return { title: 'Edit a notebook', detail: str(input.notebook_path) };
+    case 'Grep': return { title: 'Search files', detail: [str(input.pattern), str(input.path) || str(input.glob)].filter(Boolean).join(' in ') };
+    case 'Glob': return { title: 'List files', detail: [str(input.pattern), str(input.path)].filter(Boolean).join(' in ') };
     case 'Edit': case 'MultiEdit': return { title: 'Edit a file', detail: str(input.file_path) };
     case 'NotebookEdit': return { title: 'Edit a notebook', detail: str(input.notebook_path) };
     default: {
