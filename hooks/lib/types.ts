@@ -1,0 +1,367 @@
+// Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
+// Shared data model for Multiplayer.
+// Everything here is plain JSON so the server, the web app, the Claude Code mod
+// and the simulator can all hold the same state.
+
+export type Id = string;
+export type MemberId = string;
+export type Role = 'host' | 'prompter' | 'viewer';
+export type Via = 'claude-code' | 'claude-ai' | 'web';
+export type Color = 'blue' | 'orange' | 'green' | 'violet' | 'pink' | 'teal';
+export const COLORS: Color[] = ['blue', 'orange', 'green', 'violet', 'pink', 'teal'];
+
+export interface Policy {
+  /** Sites shared turns may reach without asking the sender. */
+  sites: string[];
+  /** Sending in someone else's branch needs the owner's OK. */
+  ownerOk: boolean;
+  /** Only the host can merge into main. */
+  hostMerges: boolean;
+  /** Seconds a paused turn holds its lease before anyone can take over. */
+  leaseSeconds: number;
+  /**
+   * Shared turns use the project's setup only: the repo's MCP servers, settings and CLAUDE.md,
+   * the same for every sender, without anyone's personal plugins, servers, connectors or
+   * instructions. Off: each sender's Claude Code as they have it. Older spaces lack it (off).
+   */
+  projectSetup?: boolean;
+}
+
+export const DEFAULT_POLICY: Policy = {
+  sites: ['github.com', 'docs.anthropic.com'],
+  ownerOk: true,
+  hostMerges: true,
+  leaseSeconds: 120,
+  projectSetup: false,
+};
+
+export interface Space {
+  id: Id;
+  name: string;
+  /** Join code, e.g. MC-7Q2X. */
+  code: string;
+  hostId: MemberId;
+  policy: Policy;
+  createdAt: number;
+  endedAt?: number;
+  endedBy?: MemberId;
+}
+
+export interface Member {
+  id: MemberId;
+  name: string;
+  color: Color;
+  role: Role;
+  via: Via;
+  joinedAt: number;
+  leftAt?: number;
+  /** Notification preference. */
+  notify: 'needed' | 'all' | 'off';
+  /** Set when the member's plan declined a turn: until when, if the runner knew. */
+  limit?: { at: number; until?: number } | null;
+}
+
+export interface Conversation {
+  id: Id;
+  title: string;
+  createdBy: MemberId;
+  createdAt: number;
+  mainBranchId: Id;
+  /** Decision ids carried in from earlier conversations. */
+  carried: string[];
+  filesFromMain: boolean;
+}
+
+export interface ModelPin {
+  name: string;
+  effort: 'low' | 'medium' | 'high';
+  setBy: MemberId;
+  at: number;
+}
+
+export interface Branch {
+  id: Id;
+  conversationId: Id;
+  name: string;
+  /** null for a conversation's main line. */
+  ownerId: MemberId | null;
+  parentId: Id | null;
+  /** The parent's turn this branch continues after (inclusive). Null: from the parent's start. */
+  forkTurnId: Id | null;
+  /** When a branch was made by editing a shared turn: that turn's id (the branch excludes it). */
+  editOf?: Id;
+  private: boolean;
+  state: 'active' | 'parked' | 'merged';
+  model: ModelPin;
+  createdAt: number;
+}
+
+export interface Part {
+  id: Id;
+  branchId: Id;
+  memberId: MemberId;
+  text: string;
+  at: number;
+  /** In "Claude's view first" mode: held back until Claude has answered. */
+  position?: boolean;
+  /** A turn from another branch this part cites: it reaches Claude word for word with this turn. */
+  cites?: Id;
+  /** Someone else changed this part in an edit (kept when it goes back to the draft). */
+  editedBy?: MemberId;
+}
+
+export type TurnMode =
+  | 'normal'
+  | 'view-first'   // positions held back
+  | 'reveal'       // positions shown after a view-first answer
+  | 'weigh'        // conflicting parts, Claude asked to weigh both
+  | 'merge-note'   // writes the merge note into main
+  | 'recap'        // "since you left" recap, private to the asker
+  | 'aside'        // a side question on a branch, private to the asker (Claude Code's /btw)
+  | 'combine';     // combine two conflicting file changes
+
+export type TurnStatus =
+  | 'requested'    // waiting for the sender's runner to pick it up
+  | 'conflict'     // parts disagree; people settle it
+  | 'held'         // sent in someone else's branch: waiting for the owner's OK
+  | 'running'
+  | 'approval'     // runner waiting for its owner to approve a step
+  | 'paused'       // runner went quiet mid-turn; lease countdown
+  | 'done'
+  | 'failed'
+  | 'stopped'
+  | 'declined';    // not run at all (plan limit, model unavailable)
+
+export interface Step {
+  i: number;
+  tool: string;
+  text: string;
+  detail?: string;
+  state: 'run' | 'done' | 'fail' | 'wait' | 'denied';
+}
+
+export interface Usage {
+  input: number;
+  output: number;
+  cacheRead?: number;
+  cacheWrite?: number;
+}
+
+export interface TurnFailure {
+  reason: 'error' | 'limit' | 'refusal' | 'model-unavailable' | 'runner-offline' | 'not-connected' | 'not-signed-in';
+  detail?: string;
+  resetsAt?: number;
+}
+
+export interface Turn {
+  id: Id;
+  branchId: Id;
+  conversationId: Id;
+  /** Each person's part. `editedBy`: someone else changed it, in an edit of an earlier turn. */
+  parts: { memberId: MemberId; text: string; position?: boolean; editedBy?: MemberId; cites?: Id }[];
+  senderId: MemberId;
+  /** The member whose Claude Code runs it (sender, or whoever took over). */
+  runnerId: MemberId;
+  mode: TurnMode;
+  status: TurnStatus;
+  requestedAt: number;
+  startedAt?: number;
+  endedAt?: number;
+  pausedAt?: number;
+  steps: Step[];
+  text: string;
+  usage?: Usage;
+  model?: string;
+  failure?: TurnFailure;
+  conflict?: { summary: string; conflicting: number[]; options: { key: string; label: string; memberId?: MemberId }[] };
+  /** Set once people settled a conflict, so the runner doesn't check again. */
+  checked?: boolean;
+  handedFrom?: MemberId;
+  takenFrom?: MemberId;
+  retryOf?: Id;
+  stoppedBy?: MemberId;
+  /** For a reveal turn: the view-first turn it answers. */
+  revealOf?: Id;
+  /** For a reveal turn: one reply line per position, by index of `parts`. */
+  replies?: string[];
+  mergeId?: Id;
+  /** Private turns (recaps, private lanes) are only visible to their runner. */
+  private?: boolean;
+}
+
+export type DecisionStatus = 'proposed' | 'approved' | 'replaced' | 'withdrawn';
+
+export interface Decision {
+  id: string;           // D1, D2…
+  text: string;
+  status: DecisionStatus;
+  proposedBy: MemberId | 'claude';
+  turnId?: Id;
+  /** Where it was made. Null once it holds on its conversation's main line (made there, or merged). */
+  branchId: Id | null;
+  /** The conversation it was made in. It holds there, and in later conversations that carried it. Absent on older logs: it holds everywhere. */
+  conversationId?: Id;
+  /** The decision this one would replace, if merged that way. */
+  replaces?: string;
+  approvedBy: MemberId[];
+  at: number;
+  dissent: { memberId: MemberId; text: string; at: number }[];
+  notes: string[];
+}
+
+export interface Question {
+  id: string;           // Q1, Q2…
+  text: string;
+  by: MemberId | 'claude';
+  at: number;
+  branchId: Id | null;
+  /** The conversation it was asked in. Absent on older logs: it shows everywhere. */
+  conversationId?: Id;
+  resolvedAt?: number;
+}
+
+export interface ChatMessage {
+  id: Id;
+  memberId: MemberId;
+  text: string;
+  at: number;
+}
+
+export type MergeChoice = 'keep' | 'replace' | 'open';
+
+export interface MergeItem {
+  key: string;
+  kind: 'decision' | 'question' | 'files' | 'dissent';
+  title: string;
+  sub?: string;
+  locked?: boolean;
+  defaultOn: boolean;
+}
+
+export interface Merge {
+  id: Id;
+  fromBranchId: Id;
+  toBranchId: Id;
+  requestedBy: MemberId;
+  at: number;
+  status: 'requested' | 'done' | 'cancelled';
+  /** What the branch would bring back, proposed by the branch's runner or by people. */
+  items: MergeItem[];
+  conflict?: { decisionId: string; summary: string };
+  doneBy?: MemberId;
+  doneAt?: number;
+  choice?: MergeChoice;
+  picks?: Record<string, boolean>;
+  noteTurnId?: Id;
+}
+
+export interface Ask {
+  id: Id;
+  kind: 'send-in-branch';
+  from: MemberId;
+  to: MemberId;
+  branchId: Id;
+  /** The turn waiting for the answer. */
+  turnId: Id;
+  status: 'open' | 'allowed' | 'declined';
+  at: number;
+}
+
+export interface Handoff {
+  id: Id;
+  branchId: Id;
+  from: MemberId;
+  to: MemberId;
+  parts: { memberId: MemberId; text: string }[];
+  turnId?: Id;
+  status: 'offered' | 'taken' | 'cancelled';
+  at: number;
+}
+
+export interface Lease {
+  branchId: Id;
+  holderId: MemberId;
+  turnId: Id;
+  heartbeatAt: number;
+}
+
+export interface Note {
+  id: Id;
+  branchId: Id;
+  memberId: MemberId;
+  /** The private lane it was shared from; absent for a note from the person's own Claude Code (/multiplayer share). */
+  fromBranchId?: Id;
+  /** The side question it brings back (`aside.share`): `question` is what was asked, `text` the answer. */
+  turnId?: Id;
+  text: string;
+  question?: string;
+  at: number;
+}
+
+export interface FilesPush {
+  id: Id;
+  memberId: MemberId;
+  /** The conversation branch whose turn made the commits, when known. */
+  branchId?: Id;
+  branch: string;
+  commits: { sha: string; subject: string }[];
+  summary: string;
+  at: number;
+}
+
+/** One row of a branch's timeline, in order. */
+export type TimelineItem =
+  | { kind: 'turn'; id: Id }
+  | { kind: 'note'; id: Id }
+  | { kind: 'event'; id: Id; icon: string; actor: MemberId | 'server'; text: string; at: number; link?: { kind: 'branch' | 'decision' | 'merge' | 'map'; id?: string; label: string } };
+
+export interface SpaceState {
+  seq: number;
+  space: Space;
+  members: Record<MemberId, Member>;
+  conversations: Record<Id, Conversation>;
+  conversationOrder: Id[];
+  branches: Record<Id, Branch>;
+  parts: Record<Id, Part[]>;          // by branch: the shared prompt being written
+  turns: Record<Id, Turn>;
+  timeline: Record<Id, TimelineItem[]>; // by branch
+  decisions: Decision[];
+  questions: Question[];
+  chat: ChatMessage[];
+  merges: Record<Id, Merge>;
+  asks: Record<Id, Ask>;
+  handoffs: Record<Id, Handoff>;
+  leases: Record<Id, Lease>;         // by branch
+  notes: Record<Id, Note>;
+  pushes: FilesPush[];
+  /** Last event seq each member has seen, for "since you left". */
+  seen: Record<MemberId, number>;
+}
+
+/** Live, never stored: who is doing what right now. */
+export interface Presence {
+  memberId: MemberId;
+  status: 'here' | 'writing' | 'approving' | 'away';
+  branchId?: Id;
+  conversationId?: Id;
+  at: number;
+}
+
+/** What a member's runner (their Claude Code with the mod, or claude.ai) reports. */
+export interface RunnerInfo {
+  memberId: MemberId;
+  kind: 'claude-code' | 'claude-ai' | 'sim';
+  connected: boolean;
+  version?: string;
+  model?: string;
+  models?: string[];
+  account?: string;
+  cwd?: string;
+  git?: { repo?: string; branch?: string; dirty?: boolean };
+  sandbox?: boolean;
+  /** Not picking up turns until resumed. */
+  paused?: boolean;
+  /** The branch this runner's Claude Code session currently holds context for. */
+  focus?: { conversationId: Id; branchId: Id };
+  at: number;
+}

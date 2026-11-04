@@ -1,0 +1,735 @@
+// Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
+import type { Command, CommandContext } from './commands.ts';
+import type { EventBody } from './events.ts';
+import {
+  activeTurn, branchDecisions, canSee, clip, historyTurns, isActive, isMain, isOneOff, latestTurnId, mainOf,
+  memberName, nextDecisionId, nextQuestionId, hhmm, modelLabel,
+} from './helpers.ts';
+import type { Branch, Decision, MergeItem, Part, Policy, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
+import { DEFAULT_POLICY } from './types.ts';
+import { invalid } from './validate.ts';
+import { canSeeTurn } from './redact.ts';
+
+export type Decided = { ok: true; events: EventBody[] } | { ok: false; error: string; code?: string };
+
+const fail = (error: string, code?: string): Decided => ({ ok: false, error, code });
+const ok = (...events: EventBody[]): Decided => ({ ok: true, events });
+
+function ev(ctx: CommandContext, branchId: Id, icon: string, text: string, link?: Extract<TimelineItem, { kind: 'event' }>['link']): EventBody {
+  return { type: 'timeline.event', branchId, item: { kind: 'event', id: ctx.id('ev'), icon, actor: ctx.actor, text, at: ctx.now, link } };
+}
+
+/** Text as one sentence: a full stop added only if it has no closing punctuation. */
+function sentence(text: string): string {
+  const t = text.trim();
+  return /[.!?…]$/.test(t) ? t : `${t}.`;
+}
+
+function latestMain(s: SpaceState): Branch | undefined {
+  const c = s.conversationOrder[0];
+  return c ? mainOf(s, c) : undefined;
+}
+
+function turnFrom(ctx: CommandContext, s: SpaceState, branch: Branch, parts: Turn['parts'], patch: Partial<Turn> = {}): Turn {
+  return {
+    id: ctx.id('t'),
+    branchId: branch.id,
+    conversationId: branch.conversationId,
+    parts,
+    senderId: ctx.actor as MemberId,
+    runnerId: ctx.actor as MemberId,
+    mode: 'normal',
+    status: 'requested',
+    requestedAt: ctx.now,
+    steps: [],
+    text: '',
+    model: branch.model.name,
+    private: branch.private || undefined,
+    ...patch,
+  };
+}
+
+/**
+ * Validates a command against the state and turns it into events.
+ * The one place the rules live: who may do what, when.
+ */
+export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decided {
+  const bad = invalid(cmd);
+  if (bad) return fail(bad, 'invalid');
+  const actor = ctx.actor;
+  const me = actor === 'server' ? undefined : s.members[actor];
+  const isServer = actor === 'server';
+  const isRunnerCmd = cmd.type.startsWith('runner.');
+  const isServerCmd = cmd.type.startsWith('server.');
+
+  if (isServerCmd && !isServer) return fail('Only the server can do that.', 'forbidden');
+  if (!isServer && (!me || me.leftAt)) return fail('You are not in this space.', 'forbidden');
+  if (isRunnerCmd && ctx.source !== 'runner' && ctx.source !== 'mcp') return fail('Only a runner can report on turns.', 'forbidden');
+
+  const ended = !!s.space.endedAt;
+  if (ended && !['seen', 'member.notify'].includes(cmd.type)) return fail('This space has ended. It is read-only.', 'ended');
+
+  const role = me?.role;
+  const canWrite = isServer || role === 'host' || role === 'prompter';
+  const isHost = isServer || role === 'host';
+  const needWrite = (): Decided | null => (canWrite ? null : fail('Viewers can read and chat, but not write to Claude.', 'forbidden'));
+  const needHost = (): Decided | null => (isHost ? null : fail('Only the host can do that.', 'forbidden'));
+  const branchOk = (id: Id): Branch | Decided => {
+    const b = s.branches[id];
+    if (!b || !canSee(s, actor, id)) return fail('No such branch.', 'not-found');
+    return b;
+  };
+  const isDecided = (x: unknown): x is Decided => !!x && typeof x === 'object' && 'ok' in (x as object);
+  /** Turns someone can't see (another person's recap or private lane) don't exist for them. */
+  const seesTurn = (t: Turn | undefined): t is Turn => !!t && (isServer || canSeeTurn(s, actor as MemberId, t));
+  const seesBranchOf = (branchId: Id | null | undefined) => !branchId || isServer || canSee(s, actor, branchId);
+
+  switch (cmd.type) {
+    // ---------------------------------------------------------------- members
+    case 'member.rename': {
+      const name = cmd.name.trim();
+      if (!name || name.length > 40) return fail('Names are 1 to 40 characters.');
+      return ok({ type: 'member.updated', memberId: actor as MemberId, patch: { name } });
+    }
+    case 'member.notify':
+      return ok({ type: 'member.updated', memberId: actor as MemberId, patch: { notify: cmd.notify } });
+    case 'member.limit-clear':
+      return ok({ type: 'member.updated', memberId: actor as MemberId, patch: { limit: null } });
+    case 'member.role': {
+      const deny = needHost(); if (deny) return deny;
+      const m = s.members[cmd.memberId];
+      if (!m || m.leftAt) return fail('No such member.');
+      if (cmd.role === 'host') return ok({ type: 'space.host', hostId: m.id });
+      if (m.id === s.space.hostId) return fail('Hand hosting to someone else first.');
+      return ok({ type: 'member.updated', memberId: m.id, patch: { role: cmd.role } });
+    }
+    case 'member.leave': {
+      const out: EventBody[] = [];
+      const main = latestMain(s);
+      const name = memberName(s, actor);
+      if (actor === s.space.hostId) {
+        if (cmd.end) {
+          out.push({ type: 'space.ended' });
+          if (main) out.push(ev(ctx, main.id, 'power', `${name} ended the space · everyone kept a full copy`));
+          return ok(...out);
+        }
+        const to = cmd.handTo && s.members[cmd.handTo] && !s.members[cmd.handTo].leftAt ? cmd.handTo
+          : Object.values(s.members).find((m) => !m.leftAt && m.id !== actor && m.role !== 'viewer')?.id
+          ?? Object.values(s.members).find((m) => !m.leftAt && m.id !== actor)?.id;
+        if (!to) {
+          out.push({ type: 'space.ended' });
+          if (main) out.push(ev(ctx, main.id, 'power', `${name} left, and the space ended`));
+          out.push({ type: 'member.left', memberId: actor as MemberId });
+          return ok(...out);
+        }
+        out.push({ type: 'space.host', hostId: to });
+        out.push({ type: 'member.left', memberId: actor as MemberId });
+        if (main) out.push(ev(ctx, main.id, 'crown', `${name} left · ${memberName(s, to)} is the host now`));
+        return ok(...out);
+      }
+      out.push({ type: 'member.left', memberId: actor as MemberId });
+      if (main) out.push(ev(ctx, main.id, 'logout', `${name} left the space`));
+      return ok(...out);
+    }
+    case 'member.remove': {
+      const deny = needHost(); if (deny) return deny;
+      const m = s.members[cmd.memberId];
+      if (!m || m.leftAt) return fail('No such member.');
+      if (m.id === actor) return fail('Use Leave to leave the space yourself.');
+      const main = latestMain(s);
+      const out: EventBody[] = [{ type: 'member.left', memberId: m.id }];
+      if (main) out.push(ev(ctx, main.id, 'logout', `${memberName(s, actor)} removed ${m.name} from the space`));
+      return ok(...out);
+    }
+    case 'space.policy': {
+      const deny = needHost(); if (deny) return deny;
+      // Spaces from before the sandbox promise was dropped still carry `sandbox`; it goes on the next change.
+      const { sandbox: _dropped, ...policy } = { ...DEFAULT_POLICY, ...s.space.policy, ...cmd.policy } as Policy & { sandbox?: unknown };
+      if (policy.leaseSeconds < 10 || policy.leaseSeconds > 3600) return fail('The lease must be between 10 seconds and an hour.');
+      return ok({ type: 'space.policy', policy });
+    }
+    case 'space.end': {
+      const deny = needHost(); if (deny) return deny;
+      const main = latestMain(s);
+      const out: EventBody[] = [{ type: 'space.ended' }];
+      if (main) out.push(ev(ctx, main.id, 'power', `${memberName(s, actor)} ended the space · everyone kept a full copy`));
+      return ok(...out);
+    }
+
+    // ---------------------------------------------------------- conversations
+    case 'conversation.create': {
+      const deny = needWrite(); if (deny) return deny;
+      const prev = latestMain(s);
+      const conversationId = ctx.id('c');
+      const mainId = ctx.id('b');
+      const carried = cmd.carry ? s.decisions.filter((d) => d.branchId === null && d.status === 'approved').map((d) => d.id) : [];
+      const main: Branch = {
+        id: mainId, conversationId, name: 'Main', ownerId: null, parentId: null, forkTurnId: null, private: false, state: 'active',
+        model: { name: cmd.model || prev?.model.name || 'opus', effort: prev?.model.effort || 'high', setBy: actor as MemberId, at: ctx.now },
+        createdAt: ctx.now,
+      };
+      const title = (cmd.title || '').trim() || 'New conversation';
+      return ok(
+        { type: 'conversation.created', conversation: { id: conversationId, title, createdBy: actor as MemberId, createdAt: ctx.now, mainBranchId: mainId, carried, filesFromMain: cmd.filesFromMain }, main },
+        ev(ctx, mainId, 'compose', `${memberName(s, actor)} started this conversation${carried.length ? `, carrying ${carried.length} decision${carried.length === 1 ? '' : 's'}` : ''}`),
+      );
+    }
+    case 'conversation.rename': {
+      const deny = needWrite(); if (deny) return deny;
+      const c = s.conversations[cmd.conversationId];
+      if (!c) return fail('No such conversation.');
+      const title = cmd.title.trim();
+      if (!title || title.length > 80) return fail('Titles are 1 to 80 characters.');
+      return ok({ type: 'conversation.renamed', conversationId: c.id, title });
+    }
+
+    // --------------------------------------------------------------- branches
+    case 'branch.fork': {
+      const deny = needWrite(); if (deny) return deny;
+      const parent = branchOk(cmd.fromBranchId); if (isDecided(parent)) return parent;
+      let forkTurnId = cmd.atTurnId ?? latestTurnId(s, parent.id) ?? parent.forkTurnId;
+      if (cmd.atTurnId) {
+        const inHistory = historyTurns(s, parent.id).some((t) => t.id === cmd.atTurnId && seesTurn(t));
+        if (!inHistory) return fail('That turn is not on this branch.');
+      }
+      if (cmd.editOf && !historyTurns(s, parent.id).some((t) => t.id === cmd.editOf && seesTurn(t))) return fail('That turn is not on this branch.');
+      const id = ctx.id('b');
+      const name = (cmd.name || '').trim() || (cmd.private ? 'Private lane' : cmd.editOf ? `${memberName(s, actor)}’s edit` : `${memberName(s, actor)}’s branch`);
+      const branch: Branch = {
+        id, conversationId: parent.conversationId, name, ownerId: actor as MemberId, parentId: parent.id,
+        forkTurnId: forkTurnId ?? null, editOf: cmd.editOf, private: !!cmd.private || parent.private, state: 'active',
+        model: { ...parent.model }, createdAt: ctx.now,
+      };
+      const out: EventBody[] = [{ type: 'branch.created', branch }];
+      const at = cmd.atTurnId && s.turns[cmd.atTurnId] ? hhmm(s.turns[cmd.atTurnId].requestedAt) : null;
+      if (!branch.private) {
+        out.push(ev(ctx, parent.id, 'branch', `${memberName(s, actor)} branched “${name}”${at ? ` from ${at}` : ''}`, { kind: 'branch', id, label: 'Open' }));
+      }
+      out.push(ev(ctx, id, branch.private ? 'lock' : 'branch', branch.private ? 'Your private lane, from the latest turn' : `Branched from ${parent.name}${at ? ` at ${at}` : ''}${cmd.editOf ? ', with an edit' : ''}`));
+      const original = cmd.editOf ? s.turns[cmd.editOf] : undefined;
+      if (cmd.editParts && original) {
+        // A reveal's positions are shown without names: an edit must not put them back.
+        if (original.mode === 'reveal') return fail('Positions shown in a reveal can’t be edited.');
+        // Each person's part stays theirs; one someone else changed says who changed it.
+        const authors = new Set<string>([...original.parts.map((p) => p.memberId), actor]);
+        if (cmd.editParts.some((p) => !authors.has(p.memberId))) return fail('An edit keeps the turn’s own authors.');
+        const parts: Turn['parts'] = cmd.editParts.filter((p) => p.text.trim()).map((p) => {
+          const text = p.text.trim();
+          // Unchanged keeps its marker (it's still the earlier editor's wording); changed by someone else gets theirs.
+          const prev = original.parts.find((o) => !o.position && o.memberId === p.memberId && o.text.trim() === text);
+          const editedBy = prev ? prev.editedBy : p.memberId !== actor ? actor as MemberId : undefined;
+          return { memberId: p.memberId as MemberId, text, ...(editedBy ? { editedBy } : {}) };
+        });
+        if (!parts.length) return fail('Nothing to send.');
+        // Positions held back stay exactly as they were, and held back: the editor never saw them.
+        const held = original.parts.filter((p) => p.position).map((p) => ({ ...p }));
+        out.push({ type: 'turn.requested', turn: turnFrom(ctx, s, branch, [...parts, ...held], held.length ? { mode: 'view-first' } : {}), consumed: [] });
+      } else if (cmd.editText && cmd.editText.trim()) {
+        const t = turnFrom(ctx, s, branch, [{ memberId: actor as MemberId, text: cmd.editText.trim() }]);
+        out.push({ type: 'turn.requested', turn: t, consumed: [] });
+      }
+      return ok(...out);
+    }
+    case 'branch.state': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      if (isMain(s, b.id)) return fail('A main line can’t be parked.');
+      if (b.state === 'merged') return fail('That branch was merged.');
+      const out: EventBody[] = [{ type: 'branch.updated', branchId: b.id, patch: { state: cmd.state } }];
+      out.push(ev(ctx, b.id, cmd.state === 'parked' ? 'pause' : 'play', cmd.state === 'parked' ? `Parked by ${memberName(s, actor)}` : `${memberName(s, actor)} picked it back up`));
+      return ok(...out);
+    }
+    case 'branch.rename': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      const name = cmd.name.trim();
+      if (!name || name.length > 60) return fail('Names are 1 to 60 characters.');
+      return ok({ type: 'branch.updated', branchId: b.id, patch: { name } });
+    }
+    case 'branch.model': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      if (!['low', 'medium', 'high'].includes(cmd.effort)) return fail('Effort is low, medium or high.');
+      return ok(
+        { type: 'branch.model', branchId: b.id, model: { name: cmd.name, effort: cmd.effort, setBy: actor as MemberId, at: ctx.now } },
+        ev(ctx, b.id, 'layers', `${memberName(s, actor)} switched ${isMain(s, b.id) ? 'main' : 'this branch'} to ${modelLabel(cmd.name)} · ${cmd.effort}, for everyone`),
+      );
+    }
+
+    // -------------------------------------------------------------- writing
+    case 'part.add': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      const text = cmd.text.trim();
+      if (!text) return fail('Write something first.');
+      if (text.length > 20000) return fail('That part is too long.');
+      if (b.state === 'merged') return fail('That branch was merged. Write in main instead.');
+      if (cmd.id && (s.parts[b.id] || []).some((p) => p.id === cmd.id)) return ok(); // already have it (offline replay)
+      let cites: Id | undefined;
+      if (cmd.cites) {
+        // A finished, shared turn from another branch: private lanes share through notes instead.
+        const c = s.turns[cmd.cites];
+        if (!seesTurn(c) || c.private || isOneOff(c) || (c.status !== 'done' && c.status !== 'stopped')) return fail('Cite a finished turn you can see.');
+        if (historyTurns(s, b.id).some((t) => t.id === c.id)) return fail('That turn is already part of this branch.');
+        cites = c.id;
+      }
+      const part: Part = { id: cmd.id || ctx.id('p'), branchId: b.id, memberId: actor as MemberId, text, at: ctx.now, position: cmd.position || undefined, ...(cites ? { cites } : {}) };
+      return ok({ type: 'part.added', part });
+    }
+    case 'part.remove': {
+      for (const [branchId, list] of Object.entries(s.parts)) {
+        const p = list.find((x) => x.id === cmd.partId);
+        if (p) {
+          if (p.memberId !== actor && !isHost) return fail('You can only remove your own parts.');
+          return ok({ type: 'part.removed', partId: p.id, branchId });
+        }
+      }
+      return ok();
+    }
+    case 'turn.send': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      if (b.state === 'merged') return fail('That branch was merged.');
+      const busy = activeTurn(s, b.id);
+      if (busy) return fail(`${memberName(s, busy.runnerId)}’s turn is still running here. One at a time on each branch.`, 'busy');
+      const parts = s.parts[b.id] || [];
+      if (!parts.length) return fail('Nothing to send yet.');
+      const mode = cmd.mode === 'view-first' ? 'view-first' : 'normal';
+      if (mode === 'view-first') {
+        if (!parts.some((p) => p.position)) return fail('Mark at least one part as a position to hold back.');
+        if (!parts.some((p) => !p.position)) return fail('Write the question itself, not only positions.');
+      }
+      const out: EventBody[] = [];
+      if (b.state === 'parked') {
+        out.push({ type: 'branch.updated', branchId: b.id, patch: { state: 'active' } });
+      }
+      const needsOk = !!b.ownerId && b.ownerId !== actor && !b.private && s.space.policy.ownerOk && !s.members[b.ownerId]?.leftAt;
+      let handedFrom: MemberId | undefined;
+      if (cmd.handoffId) {
+        const h = s.handoffs[cmd.handoffId];
+        if (!h || h.status !== 'offered' || h.to !== actor) return fail('That hand-off isn’t yours to take.');
+        handedFrom = h.from;
+        out.push({ type: 'handoff.updated', handoffId: h.id, status: 'taken' });
+      }
+      const turn = turnFrom(ctx, s, b, parts.map((p) => ({ memberId: p.memberId, text: p.text, position: p.position || undefined, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) })), {
+        mode, status: needsOk ? 'held' : 'requested', handedFrom,
+      });
+      out.push({ type: 'turn.requested', turn, consumed: parts.map((p) => p.id) });
+      if (needsOk) {
+        out.push({ type: 'ask.created', ask: { id: ctx.id('a'), kind: 'send-in-branch', from: actor as MemberId, to: b.ownerId!, branchId: b.id, turnId: turn.id, status: 'open', at: ctx.now } });
+      }
+      return ok(...out);
+    }
+    case 'turn.resolve': {
+      const deny = needWrite(); if (deny) return deny;
+      const t = s.turns[cmd.turnId];
+      if (!seesTurn(t) || t.status !== 'conflict' || !t.conflict) return fail('Nothing to settle there.');
+      if (cmd.pick === 'cancel') {
+        const restore: Part[] = t.parts.map((p, i) => ({ id: ctx.id('p'), branchId: t.branchId, memberId: p.memberId, text: p.text, at: ctx.now + i, position: p.position, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) }));
+        return ok({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore });
+      }
+      if (cmd.pick === 'both') {
+        return ok({ type: 'turn.resolved', turnId: t.id, pick: 'both', parts: t.parts, mode: 'weigh' });
+      }
+      const conflicting = new Set(t.conflict.conflicting);
+      const opt = t.conflict.options.find((o) => o.key === cmd.pick);
+      if (!opt) return fail('Pick one of the options.');
+      const keepBy = opt.memberId;
+      const parts = t.parts.filter((p, i) => !conflicting.has(i) || (keepBy ? p.memberId === keepBy : false));
+      if (!parts.length) return fail('That would leave nothing to send.');
+      return ok({ type: 'turn.resolved', turnId: t.id, pick: cmd.pick, parts, mode: t.mode });
+    }
+    case 'turn.stop': {
+      const t = s.turns[cmd.turnId];
+      if (!seesTurn(t) || !isActive(t)) return fail('That turn isn’t running.');
+      if (!canWrite && t.runnerId !== actor) return fail('Viewers can’t stop turns.', 'forbidden');
+      if (t.status === 'held' || t.status === 'conflict' || (t.status === 'requested' && !t.startedAt)) {
+        // A recap's text is the asker's own: it never goes back into anyone's draft.
+        const restore: Part[] = isOneOff(t) || t.mode === 'merge-note' ? [] : t.parts.map((p, i) => ({ id: ctx.id('p'), branchId: t.branchId, memberId: p.memberId, text: p.text, at: ctx.now + i, position: p.position, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) }));
+        return ok({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore });
+      }
+      return ok({ type: 'turn.stopped', turnId: t.id, by: actor as MemberId });
+    }
+    case 'turn.takeover': {
+      const deny = needWrite(); if (deny) return deny;
+      const t = s.turns[cmd.turnId];
+      if (!seesTurn(t) || t.status !== 'paused' || !t.pausedAt) return fail('Only a paused turn can be taken over.');
+      if (isOneOff(t) && t.senderId !== actor) return fail('Only a paused turn can be taken over.');
+      const waited = ctx.now - t.pausedAt;
+      if (waited < s.space.policy.leaseSeconds * 1000) return fail(`Wait ${Math.ceil((s.space.policy.leaseSeconds * 1000 - waited) / 1000)} more seconds, in case ${memberName(s, t.runnerId)} comes back.`, 'lease');
+      if (t.runnerId === actor) return ok({ type: 'turn.resumed', turnId: t.id });
+      return ok({ type: 'turn.takeover', turnId: t.id, runnerId: actor as MemberId });
+    }
+    case 'turn.retry': {
+      const deny = needWrite(); if (deny) return deny;
+      const t = s.turns[cmd.turnId];
+      if (!seesTurn(t) || !['failed', 'stopped', 'declined'].includes(t.status)) return fail('Only a failed or stopped turn can be retried.');
+      if (isOneOff(t) && t.senderId !== actor) return fail('Only a failed or stopped turn can be retried.');
+      const b = branchOk(t.branchId); if (isDecided(b)) return b;
+      const busy = activeTurn(s, b.id);
+      if (busy) return fail('Another turn is running on this branch.', 'busy');
+      const turn = turnFrom(ctx, s, b, t.parts, { mode: t.mode === 'reveal' ? 'reveal' : t.mode, retryOf: t.id, revealOf: t.revealOf, checked: true, private: t.private });
+      return ok({ type: 'turn.requested', turn, consumed: [] });
+    }
+    case 'turn.reveal': {
+      const deny = needWrite(); if (deny) return deny;
+      const t = s.turns[cmd.turnId];
+      if (!seesTurn(t) || t.mode !== 'view-first' || t.status !== 'done') return fail('Positions are shown after Claude’s first answer.');
+      if (Object.values(s.turns).some((x) => x.revealOf === t.id && x.status !== 'failed' && x.status !== 'stopped')) return fail('Already shown.');
+      const b = branchOk(t.branchId); if (isDecided(b)) return b;
+      const busy = activeTurn(s, b.id);
+      if (busy) return fail('Another turn is running on this branch.', 'busy');
+      const positions = t.parts.filter((p) => p.position);
+      // Shuffle so the order says nothing about who sent it.
+      const shuffled = positions.map((p, i) => ({ p, k: (i * 7919 + t.id.length * 31 + ctx.now) % 101 })).sort((a, b2) => a.k - b2.k).map((x) => ({ memberId: x.p.memberId, text: x.p.text, position: true }));
+      const turn = turnFrom(ctx, s, b, shuffled, { mode: 'reveal', revealOf: t.id, checked: true });
+      return ok({ type: 'turn.requested', turn, consumed: [] });
+    }
+    case 'handoff.offer': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      const to = s.members[cmd.to];
+      if (!to || to.leftAt || to.role === 'viewer' || to.id === actor) return fail('Hand it to someone who can send.');
+      const parts = (s.parts[b.id] || []).map((p) => ({ memberId: p.memberId, text: p.text }));
+      if (!parts.length) return fail('Nothing to hand off.');
+      const out: EventBody[] = [];
+      for (const h of Object.values(s.handoffs)) if (h.status === 'offered' && h.branchId === b.id) out.push({ type: 'handoff.updated', handoffId: h.id, status: 'cancelled' });
+      out.push({ type: 'handoff.offered', handoff: { id: ctx.id('h'), branchId: b.id, from: actor as MemberId, to: to.id, parts, status: 'offered', at: ctx.now } });
+      return ok(...out);
+    }
+    case 'handoff.cancel': {
+      const h = s.handoffs[cmd.handoffId];
+      if (!h || h.status !== 'offered') return ok();
+      if (h.from !== actor && h.to !== actor) return fail('Not your hand-off.');
+      return ok({ type: 'handoff.updated', handoffId: h.id, status: 'cancelled' });
+    }
+    case 'ask.answer': {
+      const a = s.asks[cmd.askId];
+      if (!a || a.status !== 'open') return fail('That request was already answered.');
+      if (a.to !== actor) return fail('Only the branch owner can answer that.', 'forbidden');
+      const out: EventBody[] = [{ type: 'ask.answered', askId: a.id, allow: cmd.allow }];
+      const t = s.turns[a.turnId];
+      if (t && t.status === 'held') {
+        if (cmd.allow) out.push({ type: 'turn.released', turnId: t.id });
+        else {
+          const restore: Part[] = t.parts.map((p, i) => ({ id: ctx.id('p'), branchId: t.branchId, memberId: p.memberId, text: p.text, at: ctx.now + i, position: p.position, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) }));
+          out.push({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore });
+        }
+      }
+      return ok(...out);
+    }
+
+    // ------------------------------------------------------------- decisions
+    case 'decision.propose': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      const text = cmd.text.trim();
+      if (!text) return fail('Write the decision first.');
+      const d: Decision = { id: nextDecisionId(s), text: clip(text, 400), status: 'proposed', proposedBy: actor as MemberId, approvedBy: [], at: ctx.now, dissent: [], notes: [], branchId: isMain(s, b.id) ? null : b.id, conversationId: b.conversationId, replaces: cmd.replaces };
+      return ok({ type: 'decision.proposed', decision: d, branchId: b.id });
+    }
+    case 'decision.approve': {
+      const deny = needWrite(); if (deny) return deny;
+      const d = s.decisions.find((x) => x.id === cmd.decisionId);
+      if (!d || !seesBranchOf(d.branchId)) return fail('No such decision.');
+      if (d.status === 'replaced' || d.status === 'withdrawn') return fail('That decision no longer holds.');
+      if (d.approvedBy.includes(actor as MemberId)) return ok();
+      return ok({ type: 'decision.approved', decisionId: d.id, memberId: actor as MemberId });
+    }
+    case 'decision.dissent': {
+      const deny = needWrite(); if (deny) return deny;
+      const d = s.decisions.find((x) => x.id === cmd.decisionId);
+      if (!d || !seesBranchOf(d.branchId)) return fail('No such decision.');
+      const text = cmd.text.trim();
+      if (!text) return fail('Say what you disagree with.');
+      return ok({ type: 'decision.dissent', decisionId: d.id, memberId: actor as MemberId, text: clip(text, 400) });
+    }
+    case 'question.add': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      const text = cmd.text.trim();
+      if (!text) return fail('Write the question first.');
+      return ok({ type: 'question.added', question: { id: nextQuestionId(s), text: clip(text, 300), by: actor as MemberId, at: ctx.now, branchId: isMain(s, b.id) ? null : b.id, conversationId: b.conversationId }, branchId: b.id });
+    }
+    case 'question.resolve': {
+      const deny = needWrite(); if (deny) return deny;
+      const q = s.questions.find((x) => x.id === cmd.questionId);
+      if (!q || !seesBranchOf(q.branchId)) return fail('No such question.');
+      return ok({ type: 'question.updated', questionId: q.id, resolved: !q.resolvedAt });
+    }
+    case 'chat.send': {
+      const text = cmd.text.trim();
+      if (!text) return fail('Write something first.');
+      if (text.length > 4000) return fail('That message is too long.');
+      return ok({ type: 'chat.message', message: { id: ctx.id('m'), memberId: actor as MemberId, text, at: ctx.now } });
+    }
+
+    // ---------------------------------------------------------------- merges
+    case 'merge.request': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.fromBranchId); if (isDecided(b)) return b;
+      if (isMain(s, b.id)) return fail('Main is where merges go.');
+      if (b.private) return fail('Share from a private lane instead; it never merges.');
+      if (b.state === 'merged') return fail('Already merged.');
+      if (Object.values(s.merges).some((m) => m.fromBranchId === b.id && m.status === 'requested')) return fail('There is already a merge request for this branch.');
+      const target = b.parentId && s.branches[b.parentId] ? s.branches[b.parentId] : mainOf(s, b.conversationId)!;
+      const items: MergeItem[] = [];
+      let conflict: { decisionId: string; summary: string } | undefined;
+      for (const d of s.decisions.filter((x) => x.branchId === b.id && x.status !== 'withdrawn')) {
+        if (d.replaces) {
+          const old = s.decisions.find((x) => x.id === d.replaces);
+          if (old && old.status === 'approved') {
+            conflict = { decisionId: old.id, summary: `${target.name} says: ${sentence(old.text)} This branch says: ${sentence(d.text)}` };
+            continue;
+          }
+        }
+        items.push({ key: d.id, kind: 'decision', title: `${d.id} · ${d.text}`, sub: d.status === 'approved' ? 'Approved on the branch' : 'Proposed on the branch', defaultOn: true });
+      }
+      for (const q of s.questions.filter((x) => x.branchId === b.id && !x.resolvedAt)) {
+        items.push({ key: q.id, kind: 'question', title: q.text, sub: 'Open question', defaultOn: true });
+      }
+      const pushes = s.pushes.filter((p) => p.branchId === b.id);
+      if (pushes.length) {
+        const n = pushes.reduce((a, p) => a + p.commits.length, 0);
+        items.push({ key: 'files', kind: 'files', title: `${n} commit${n === 1 ? '' : 's'} on ${pushes[pushes.length - 1].branch}`, sub: 'The branch’s file changes, into main’s files', defaultOn: false });
+      }
+      if (conflict && b.ownerId) {
+        items.push({ key: 'dissent', kind: 'dissent', title: `${memberName(s, b.ownerId)}’s view, kept as dissent`, sub: `Always travels with ${conflict.decisionId}`, locked: true, defaultOn: true });
+      }
+      const mergeId = ctx.id('mr');
+      return ok(
+        { type: 'merge.requested', merge: { id: mergeId, fromBranchId: b.id, toBranchId: target.id, requestedBy: actor as MemberId, at: ctx.now, status: 'requested', items, conflict } },
+        ev(ctx, b.id, 'merge', `${memberName(s, actor)} asked to merge this into ${target.name}`, { kind: 'merge', id: mergeId, label: 'Review' }),
+      );
+    }
+    case 'merge.complete': {
+      const m = s.merges[cmd.mergeId];
+      if (!m || m.status !== 'requested') return fail('That merge isn’t open.');
+      if (s.space.policy.hostMerges && !isHost) return fail('Only the host merges into main in this space. You can ask them.', 'forbidden');
+      const deny = needWrite(); if (deny) return deny;
+      const from = s.branches[m.fromBranchId];
+      const to = s.branches[m.toBranchId];
+      if (!from || !to) return fail('That branch is gone.');
+      const target = isMain(s, to.id) ? null : to.id;
+      const picks = { ...Object.fromEntries(m.items.map((i) => [i.key, i.locked ? true : !!(cmd.picks[i.key] ?? i.defaultOn)])) };
+      const out: EventBody[] = [];
+      const name = memberName(s, actor);
+      const brought: string[] = [];
+      for (const it of m.items) {
+        if (!picks[it.key]) continue;
+        if (it.kind === 'decision') {
+          out.push({ type: 'decision.updated', decisionId: it.key, branchId: target, note: `Merged from ${from.name}` });
+          const d = s.decisions.find((x) => x.id === it.key);
+          if (d && d.status === 'proposed' && actor !== 'server') out.push({ type: 'decision.approved', decisionId: d.id, memberId: actor as MemberId });
+          brought.push(it.key);
+        }
+        if (it.kind === 'question') out.push({ type: 'question.updated', questionId: it.key, branchId: target });
+      }
+      let choiceText = '';
+      if (m.conflict) {
+        const old = s.decisions.find((x) => x.id === m.conflict!.decisionId)!;
+        const nu = s.decisions.find((x) => x.branchId === from.id && x.replaces === old.id)!;
+        if (cmd.choice === 'replace' && nu) {
+          out.push({ type: 'decision.updated', decisionId: old.id, status: 'replaced', note: `Replaced by ${nu.id} when ${from.name} merged` });
+          out.push({ type: 'decision.updated', decisionId: nu.id, branchId: target, note: `Replaced ${old.id}` });
+          if (nu.status === 'proposed' && actor !== 'server') out.push({ type: 'decision.approved', decisionId: nu.id, memberId: actor as MemberId });
+          choiceText = `${old.id} replaced by ${nu.id}`;
+        } else if (cmd.choice === 'open' && nu) {
+          out.push({ type: 'question.added', question: { id: nextQuestionId(s), text: clip(`${old.text}, or ${nu.text}?`, 300), by: actor as MemberId, at: ctx.now, branchId: target, conversationId: to.conversationId }, branchId: to.id });
+          out.push({ type: 'decision.updated', decisionId: nu.id, status: 'withdrawn', note: 'Left open as a question at merge' });
+          choiceText = `${old.id} left open as a question`;
+        } else if (nu) {
+          out.push({ type: 'decision.updated', decisionId: old.id, note: `Kept when ${from.name} merged` });
+          out.push({ type: 'decision.updated', decisionId: nu.id, status: 'withdrawn', note: `Not adopted; ${old.id} kept` });
+          if (from.ownerId) out.push({ type: 'decision.dissent', decisionId: old.id, memberId: from.ownerId, text: nu.text });
+          choiceText = `${old.id} kept`;
+        }
+      }
+      // The writer gets the branch's own turns as context (buildTurnContext), so the note
+      // can carry what the branch found, not only its decisions.
+      const noteBrief = [
+        `Write the merge note for “${from.name}” going into ${to.name}: two to four plain, specific sentences on what the branch found or concluded that ${to.name} should now know, then what changed in the decisions.`,
+        choiceText ? `Conflict: ${choiceText}.` : '',
+        brought.length ? `Decisions brought in: ${brought.join(', ')}.` : 'No new decisions brought in.',
+        // Only keeping the old decision records the branch owner's view as dissent.
+        m.conflict && from.ownerId && cmd.choice === 'keep' ? `${memberName(s, from.ownerId)}’s view is kept as dissent.` : '',
+        'Don’t describe how merging works.',
+      ].filter(Boolean).join(' ');
+      const noteTurn = turnFrom(ctx, s, to, [{ memberId: actor as MemberId, text: noteBrief }], { mode: 'merge-note', mergeId: m.id, checked: true });
+      out.push(
+        { type: 'branch.updated', branchId: from.id, patch: { state: 'merged' } },
+        ev(ctx, to.id, 'merge', `${name} merged “${from.name}” into ${to.name}`, { kind: 'decision', label: 'Decisions' }),
+        ev(ctx, from.id, 'merge', `Merged into ${to.name} by ${name}`),
+        { type: 'turn.requested', turn: noteTurn, consumed: [] },
+        { type: 'merge.done', mergeId: m.id, choice: cmd.choice, picks, noteTurnId: noteTurn.id },
+      );
+      return ok(...out);
+    }
+    case 'merge.cancel': {
+      const m = s.merges[cmd.mergeId];
+      if (!m || m.status !== 'requested') return ok();
+      if (m.requestedBy !== actor && !isHost) return fail('Only who asked, or the host, can cancel it.');
+      return ok({ type: 'merge.cancelled', mergeId: m.id });
+    }
+    case 'share.post': {
+      const deny = needWrite(); if (deny) return deny;
+      if (!cmd.fromBranchId === !cmd.toBranchId) return fail('Share from your private lane, or to a branch.');
+      if (cmd.toBranchId) {
+        // From the person's own Claude Code: a note they reviewed, on a branch they can write in.
+        const to = branchOk(cmd.toBranchId); if (isDecided(to)) return to;
+        if (to.private) return fail('Share to a branch the others can see.');
+        const text = cmd.text.trim();
+        if (!text) return fail('Nothing to share.');
+        return ok({ type: 'note.shared', note: { id: ctx.id('n'), branchId: to.id, memberId: actor as MemberId, text: clip(text, 8000), at: ctx.now } });
+      }
+      const b = branchOk(cmd.fromBranchId!); if (isDecided(b)) return b;
+      if (!b.private || b.ownerId !== actor) return fail('Share from your own private lane.');
+      const main = mainOf(s, b.conversationId);
+      if (!main) return fail('No main line to share to.');
+      const text = cmd.text.trim();
+      if (!text) return fail('Nothing to share.');
+      return ok({ type: 'note.shared', note: { id: ctx.id('n'), branchId: main.id, memberId: actor as MemberId, fromBranchId: b.id, text: clip(text, 8000), question: cmd.question?.trim() || undefined, at: ctx.now } });
+    }
+    case 'aside.ask': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      const text = cmd.text.trim();
+      if (!text) return fail('Say what to ask.');
+      if (Object.values(s.turns).some((x) => x.mode === 'aside' && x.senderId === actor && isActive(x))) return fail('Your side question is on its way.');
+      const turn = turnFrom(ctx, s, b, [{ memberId: actor as MemberId, text }], { mode: 'aside', private: true, checked: true });
+      return ok({ type: 'turn.requested', turn, consumed: [] });
+    }
+    case 'aside.share': {
+      const deny = needWrite(); if (deny) return deny;
+      const t = s.turns[cmd.turnId];
+      if (!t || t.mode !== 'aside' || t.senderId !== actor) return fail('Bring back a side question of your own.');
+      if (t.status !== 'done' || !t.text.trim()) return fail('It hasn’t been answered yet.');
+      if (Object.values(s.notes).some((n) => n.turnId === t.id)) return fail('It’s already back.');
+      return ok({ type: 'note.shared', note: { id: ctx.id('n'), branchId: t.branchId, memberId: actor as MemberId, turnId: t.id, text: clip(t.text, 8000), question: clip(t.parts[0]?.text ?? '', 2000), at: ctx.now } });
+    }
+    case 'recap.request': {
+      const deny = needWrite(); if (deny) return deny;
+      const main = mainOf(s, cmd.conversationId);
+      if (!main) return fail('No such conversation.');
+      if (!cmd.text.trim()) return fail('Say what to recap.');
+      if (Object.values(s.turns).some((x) => x.mode === 'recap' && x.senderId === actor && isActive(x))) return fail('Your recap is on its way.');
+      const turn = turnFrom(ctx, s, main, [{ memberId: actor as MemberId, text: cmd.text }], { mode: 'recap', private: true, checked: true });
+      return ok({ type: 'turn.requested', turn, consumed: [] });
+    }
+    case 'seen':
+      if (cmd.seq <= (s.seen[actor] || 0)) return ok();
+      return ok({ type: 'seen', memberId: actor as MemberId, seq: Math.min(cmd.seq, s.seq) });
+
+    // --------------------------------------------------------------- runners
+    case 'runner.check': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor) return fail('Not your turn to run.', 'forbidden');
+      if (t.status !== 'requested') return fail('That turn isn’t waiting.');
+      if (!cmd.conflict.options.length) return fail('A conflict needs options.');
+      return ok({ type: 'turn.conflict', turnId: t.id, conflict: cmd.conflict });
+    }
+    case 'runner.start': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor) return fail('Not your turn to run.', 'forbidden');
+      if (t.status !== 'requested') return fail(`That turn is ${t.status}.`, 'state');
+      const lease = s.leases[t.branchId];
+      if (lease && lease.turnId !== t.id && !isOneOff(t)) return fail('Another turn holds this branch.', 'busy');
+      return ok({ type: 'turn.started', turnId: t.id, runnerId: actor as MemberId, model: cmd.model });
+    }
+    case 'runner.step': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor || !isActive(t)) return fail('Not running.', 'state');
+      return ok({ type: 'turn.step', turnId: t.id, step: cmd.step });
+    }
+    case 'runner.approval': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor || !isActive(t)) return fail('Not running.', 'state');
+      return ok({ type: 'turn.approval', turnId: t.id, waiting: cmd.waiting });
+    }
+    case 'runner.text': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor) return fail('Not your turn.', 'forbidden');
+      return ok({ type: 'turn.text', turnId: t.id, text: cmd.text });
+    }
+    case 'runner.done': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor) return fail('Not your turn.', 'forbidden');
+      if (t.status === 'stopped') return ok({ type: 'turn.text', turnId: t.id, text: cmd.text });
+      if (!isActive(t)) return fail('That turn already ended.', 'state');
+      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text, usage: cmd.usage, model: cmd.model, replies: cmd.replies });
+    }
+    case 'runner.fail': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor) return fail('Not your turn.', 'forbidden');
+      if (!isActive(t)) return ok();
+      const r = cmd.failure.reason;
+      if (!t.startedAt && (r === 'limit' || r === 'model-unavailable' || r === 'not-connected' || r === 'not-signed-in')) {
+        // Declined before anything ran: give the parts back so someone else can send them.
+        const out: EventBody[] = [{ type: 'turn.failed', turnId: t.id, failure: cmd.failure }];
+        if (t.mode === 'normal' || t.mode === 'view-first' || t.mode === 'weigh') {
+          const restore: Part[] = t.parts.map((p, i) => ({ id: ctx.id('p'), branchId: t.branchId, memberId: p.memberId, text: p.text, at: ctx.now + i, position: p.position, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) }));
+          out.length = 0;
+          out.push({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore });
+        }
+        if (r === 'limit') out.push({ type: 'member.updated', memberId: actor as MemberId, patch: { limit: { at: ctx.now, until: cmd.failure.resetsAt } } });
+        // A limit shows on the sender's composer; the others leave nothing behind, so say why on the branch.
+        const pin = s.branches[t.branchId]?.model.name;
+        if (r === 'model-unavailable') out.push(ev(ctx, t.branchId, 'layers', `${memberName(s, actor)}’s Claude Code can’t use ${modelLabel(pin)}, so the turn went back to the draft`));
+        if (r === 'not-connected') out.push(ev(ctx, t.branchId, 'power', `${memberName(s, actor)}’s Claude isn’t connected, so the turn went back to the draft`));
+        if (r === 'not-signed-in') out.push(ev(ctx, t.branchId, 'power', `${memberName(s, actor)}’s Claude Code isn’t signed in for shared turns, so the turn went back to the draft`));
+        return ok(...out);
+      }
+      return ok({ type: 'turn.failed', turnId: t.id, failure: cmd.failure });
+    }
+    case 'runner.decision': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor) return fail('Not your turn.', 'forbidden');
+      if (isOneOff(t) || !canWrite) return fail('Only a shared turn can record decisions.', 'forbidden');
+      const text = cmd.text.trim();
+      if (!text) return fail('Empty decision.');
+      if (cmd.replaces && !s.decisions.some((d) => d.id === cmd.replaces)) return fail(`No decision ${cmd.replaces}.`);
+      const d: Decision = { id: nextDecisionId(s), text: clip(text, 400), status: 'proposed', proposedBy: 'claude', turnId: t.id, approvedBy: [], at: ctx.now, dissent: [], notes: [], branchId: isMain(s, t.branchId) ? null : t.branchId, conversationId: t.conversationId, replaces: cmd.replaces };
+      return ok({ type: 'decision.proposed', decision: d, branchId: t.branchId });
+    }
+    case 'runner.question': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.runnerId !== actor) return fail('Not your turn.', 'forbidden');
+      if (isOneOff(t) || !canWrite) return fail('Only a shared turn can record questions.', 'forbidden');
+      const text = cmd.text.trim();
+      if (!text) return fail('Empty question.');
+      return ok({ type: 'question.added', question: { id: nextQuestionId(s), text: clip(text, 300), by: 'claude', at: ctx.now, branchId: isMain(s, t.branchId) ? null : t.branchId, conversationId: t.conversationId }, branchId: t.branchId });
+    }
+    case 'runner.pushed': {
+      const deny = needWrite(); if (deny) return deny;
+      const p = cmd.push;
+      if (!p.commits?.length) return fail('Nothing pushed.');
+      if (p.branchId && !seesBranchOf(p.branchId)) return fail('No such branch.');
+      const push = { ...p, id: ctx.id('fp'), memberId: actor as MemberId, at: ctx.now };
+      const out: EventBody[] = [{ type: 'files.pushed', push }];
+      if (p.branchId && s.branches[p.branchId] && !s.branches[p.branchId].private) {
+        out.push(ev(ctx, p.branchId, 'file', `${memberName(s, actor)} pushed ${p.commits.length} commit${p.commits.length === 1 ? '' : 's'} to ${p.branch}`, { kind: 'map', label: 'Review' }));
+      }
+      return ok(...out);
+    }
+
+    // ---------------------------------------------------------------- server
+    case 'server.pause': {
+      const t = s.turns[cmd.turnId];
+      if (!t || (t.status !== 'running' && t.status !== 'approval')) return ok();
+      return ok({ type: 'turn.paused', turnId: t.id });
+    }
+    case 'server.resume': {
+      const t = s.turns[cmd.turnId];
+      if (!t || t.status !== 'paused') return ok();
+      return ok({ type: 'turn.resumed', turnId: t.id });
+    }
+    case 'server.note': {
+      const t = s.turns[cmd.turnId];
+      if (!t || !isActive(t)) return ok();
+      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text });
+    }
+  }
+  return fail('Unknown command.');
+}
+
+export { branchDecisions };

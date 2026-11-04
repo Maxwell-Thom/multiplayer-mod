@@ -1,0 +1,23 @@
+{
+  "name": "multiplayer",
+  "version": "0.1.0",
+  "description": "Runs your turns of a shared Multiplayer conversation in your own Claude Code, on your own plan.",
+  "author": {
+    "name": "Multiplayer"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "server": {
+      "type": "string",
+      "title": "Server URL",
+      "description": "The Multiplayer server this Claude Code signs in to. The default is the hosted one; for your own, e.g. http://localhost:8787.",
+      "default": "https://server-production-491c.up.railway.app"
+    },
+    "name": {
+      "type": "string",
+      "title": "Your name",
+      "description": "The name others see when you start or join a space from here. Left empty, you are asked.",
+      "default": ""
+    }
+  }
+}

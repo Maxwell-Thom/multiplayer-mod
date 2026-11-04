@@ -1,0 +1,12 @@
+{
+  "name": "multiplayer",
+  "description": "Multiplayer: several people, one live Claude conversation, everyone on their own plan.",
+  "owner": { "name": "Maxwell Thom" },
+  "plugins": [
+    {
+      "name": "multiplayer",
+      "source": "./",
+      "description": "Runs your turns of a shared Multiplayer conversation in your own Claude Code, on your own plan."
+    }
+  ]
+}
