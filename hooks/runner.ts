@@ -39,8 +39,10 @@ const STORE_SESSIONS = 'sessions'
 const STORE_ACTIVE = 'activeSpace'
 const STORE_PAUSED = 'paused'
 const STORE_NAME = 'name'
-/** Each branch's own Claude Code session on this machine, by `<space>:<branch>`. */
+/** Each branch's own Claude Code session on this machine, by `<space>:<branch>` (before they were kept per folder). */
 const STORE_BRANCHES = 'branchSessions'
+/** The same, by folder: Claude Code keeps a session under the folder it ran in. */
+const STORE_BRANCHES_BY_FOLDER = 'branchSessionsByFolder'
 /** The biggest session file the mod can read (Claude Code reads files for mods up to 4 MiB). */
 const SESSION_MAX_BYTES = 4 * 1024 * 1024
 /** This Claude Code's account sign-ins, one per server (from /multiplayer login). */
@@ -1067,9 +1069,23 @@ export class Runner {
 
   // ======================================================= branch sessions
 
+  /**
+   * This folder's branch sessions. Claude Code keeps a session under the folder it ran in, so
+   * the same space opened from another folder (or computer) has sessions of its own there; turns
+   * run elsewhere reach them as notes, as anyone else's do.
+   */
   private async branchSessions(): Promise<Record<string, BranchSession>> {
-    const all = await soft(() => this.io.storeGet(STORE_BRANCHES))
-    return all && typeof all === 'object' ? (all as Record<string, BranchSession>) : {}
+    const byFolder = await soft(() => this.io.storeGet(STORE_BRANCHES_BY_FOLDER))
+    const mine = byFolder && typeof byFolder === 'object' ? (byFolder as Record<string, unknown>)[this.folderKey()] : undefined
+    if (mine && typeof mine === 'object') return mine as Record<string, BranchSession>
+    // Kept before sessions were per folder: only the ones whose files are in this folder.
+    const old = await soft(() => this.io.storeGet(STORE_BRANCHES))
+    if (!old || typeof old !== 'object') return {}
+    const dir = await this.sessionsDir()
+    const files = new Set(((await soft(() => this.io.list(dir))) ?? []).map((f) => f.name))
+    const out: Record<string, BranchSession> = {}
+    for (const [k, v] of Object.entries(old as Record<string, BranchSession>)) if (v?.id && files.has(`${v.id}.jsonl`)) out[k] = v
+    return out
   }
 
   private async saveBranchSession(branchId: string, bs: BranchSession, spaceId = this.session?.spaceId): Promise<void> {
@@ -1079,7 +1095,11 @@ export class Runner {
     // Newest first, so the oldest go when there are too many.
     const next: Record<string, BranchSession> = { [key]: bs }
     for (const [k, v] of Object.entries(all).filter(([k]) => k !== key).slice(0, 199)) next[k] = v
-    await soft(() => this.io.storeSet(STORE_BRANCHES, next))
+    const byFolder = ((await soft(() => this.io.storeGet(STORE_BRANCHES_BY_FOLDER))) ?? {}) as Record<string, Record<string, BranchSession>>
+    const here = this.folderKey()
+    const out: Record<string, Record<string, BranchSession>> = { [here]: next }
+    for (const [k, v] of Object.entries(typeof byFolder === 'object' ? byFolder : {}).filter(([k]) => k !== here).slice(0, 19)) out[k] = v
+    await soft(() => this.io.storeSet(STORE_BRANCHES_BY_FOLDER, out))
   }
 
   /**
