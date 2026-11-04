@@ -174,6 +174,8 @@ export class Runner {
   paused = false
   /** The person's own turn is running in this session. */
   busy = false
+  /** The server was told a shared turn waits for that turn to finish (its sender's screen says so). */
+  heldBusy = false
   queue: Job[] = []
   handling = new Set<string>()
   cooldown = new Map<string, number>()
@@ -548,7 +550,14 @@ export class Runner {
     const focus = this.lastBranchId && this.state?.branches[this.lastBranchId]
       ? { conversationId: this.state.branches[this.lastBranchId].conversationId, branchId: this.lastBranchId }
       : undefined
-    return { kind: 'claude-code', version, model, cwd, git, sandbox, paused: this.paused, focus }
+    return { kind: 'claude-code', version, model, cwd, git, sandbox, paused: this.paused, focus, ...(this.heldBusy ? { busy: true } : {}) }
+  }
+
+  /** Tells the server whether a shared turn is waiting for the person's own prompt here. */
+  private holdBusy(on: boolean): void {
+    if (this.heldBusy === on) return
+    this.heldBusy = on
+    if (this.phase === 'online') void soft(() => this.hello())
   }
 
   /** One long-poll: folds the events in, routes the inbox, reacts. */
@@ -804,12 +813,15 @@ export class Runner {
             const what = t ? this.label(t) : 'Combining the file changes'
             this.io.toast(`Multiplayer: ${t ? `${what[0].toUpperCase()}${what.slice(1)}` : what} is waiting for you to finish.`)
           }
+          if (job.kind === 'shared') this.holdBusy(true)
           break
         }
+        this.holdBusy(false)
         this.queue.shift()
         if (job.kind === 'combine') await this.submitCombine(job)
         else await this.runShared(job).catch((err: Error) => this.runFailed(job.turnId, err))
       }
+      if (!this.queue.length) this.holdBusy(false)
     } finally {
       this.pumping = false
       this.refresh()
@@ -1378,6 +1390,7 @@ export class Runner {
     this.state = null
     this.me = ''
     this.queue = []
+    this.heldBusy = false
     this.handling.clear()
     this.phase = 'off'
     this.refresh()

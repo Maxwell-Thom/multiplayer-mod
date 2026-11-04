@@ -387,6 +387,11 @@ export interface RunnerInfo {
   sandbox?: boolean;
   /** Not picking up turns until resumed. */
   paused?: boolean;
+  /**
+   * A shared turn waits here for the person's own prompt in this Claude Code to finish. Only its
+   * owner is told: what someone does in their own Claude Code is theirs.
+   */
+  busy?: boolean;
   /** The branch this runner's Claude Code session currently holds context for. */
   focus?: { conversationId: Id; branchId: Id };
   at: number;
