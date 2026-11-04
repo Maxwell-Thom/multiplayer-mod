@@ -125,6 +125,9 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'part.removed':
       s.parts = { ...s.parts, [e.branchId]: (s.parts[e.branchId] || []).filter((p) => p.id !== e.partId) };
       return s;
+    case 'turn.imported':
+      s.turns = { ...s.turns, [e.turn.id]: e.turn };
+      return pushTimeline(s, e.turn.branchId, { kind: 'turn', id: e.turn.id });
     case 'turn.requested': {
       const t = e.turn;
       s.turns = { ...s.turns, [t.id]: t };

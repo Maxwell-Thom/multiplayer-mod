@@ -75,6 +75,7 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
     case 'branch.model': return branchAudience(e.branchId);
     case 'part.added': return branchAudience(e.part.branchId);
     case 'part.removed': return branchAudience(e.branchId);
+    case 'turn.imported':
     case 'turn.requested': {
       const byBranch = branchAudience(e.turn.branchId);
       if (byBranch) return byBranch;

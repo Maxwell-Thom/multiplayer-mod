@@ -3,11 +3,14 @@ import type { Command, CommandContext } from './commands.ts';
 import type { EventBody } from './events.ts';
 import {
   activeTurn, branchDecisions, canSee, clip, historyTurns, isActive, isMain, isOneOff, latestTurnId, mainOf,
-  memberName, nextDecisionId, nextQuestionId, hhmm, modelLabel,
+  memberName, nextDecisionId, nextQuestionId, hhmm, modelLabel, turnsOf,
 } from './helpers.ts';
 import type { Branch, Decision, MergeItem, Part, Policy, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
 import { DEFAULT_POLICY } from './types.ts';
 import { invalid } from './validate.ts';
+
+/** Turns a conversation brought in may have in all. */
+export const IMPORT_MAX = 2000;
 import { canSeeTurn } from './redact.ts';
 
 export type Decided = { ok: true; events: EventBody[] } | { ok: false; error: string; code?: string };
@@ -254,6 +257,39 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         { type: 'branch.model', branchId: b.id, model: { name: cmd.name, effort: cmd.effort, setBy: actor as MemberId, at: ctx.now } },
         ev(ctx, b.id, 'layers', `${memberName(s, actor)} switched ${isMain(s, b.id) ? 'main' : 'this branch'} to ${modelLabel(cmd.name)} · ${cmd.effort}, for everyone`),
       );
+    }
+
+    case 'branch.import': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      if (b.parentId || b.private) return fail('A conversation comes in as a conversation’s main line.');
+      // Into an empty main line, or one this same person is still bringing a conversation into.
+      const there = turnsOf(s, b.id);
+      if (there.some((t) => !t.imported || t.senderId !== actor)) return fail('That conversation has turns of its own already. Bring it into a new conversation.');
+      if (there.length + cmd.turns.length > IMPORT_MAX) return fail(`A conversation brought in can have up to ${IMPORT_MAX} turns.`);
+      const source = { from: cmd.source.from, ...(cmd.source.title ? { title: clip(cmd.source.title.trim(), 200) } : {}) };
+      const events: EventBody[] = [];
+      if (!there.length) {
+        events.push(ev(ctx, b.id, 'download', `${memberName(s, actor)} brought in a conversation from ${source.from === 'claude-code' ? 'their Claude Code' : 'claude.ai'}${source.title ? `: “${clip(source.title, 80)}”` : ''}`));
+        // It carries on on the model it was had on.
+        if (cmd.model) events.push({ type: 'branch.model', branchId: b.id, model: { name: cmd.model, effort: b.model.effort, setBy: actor as MemberId, at: ctx.now } });
+      }
+      // Times as they were there, kept in order and never in the future.
+      let last = there.length ? there[there.length - 1].requestedAt : 0;
+      for (const x of cmd.turns) {
+        const at = Math.max(last, Math.min(ctx.now, typeof x.at === 'number' && x.at > 0 ? x.at : ctx.now));
+        last = at;
+        const prompt = x.prompt.trim() || '(no text)';
+        const turn: Turn = {
+          id: ctx.id('t'), branchId: b.id, conversationId: b.conversationId,
+          parts: [{ memberId: actor as MemberId, text: prompt }], senderId: actor as MemberId, runnerId: actor as MemberId,
+          mode: 'normal', status: 'done', requestedAt: at, startedAt: at, endedAt: at,
+          steps: (x.steps ?? []).map((st, i) => ({ i, tool: st.tool, text: st.text, state: st.failed ? 'fail' as const : 'done' as const })),
+          text: x.text, model: x.model || undefined, imported: source,
+        };
+        events.push({ type: 'turn.imported', turn });
+      }
+      return ok(...events);
     }
 
     // -------------------------------------------------------------- writing

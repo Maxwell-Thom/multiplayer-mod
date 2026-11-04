@@ -64,6 +64,10 @@ export type Port = {
   /** Starts a child (a branch's Claude Code session) and streams what it writes. */
   spawn: (request: SpawnRequest) => ChildStream
   read: (path: string) => Promise<string>
+  /** A folder's entries, `{ name, kind, size, mtimeMs }` each. */
+  list: (path: string) => Promise<{ name: string; kind: string; size: number; mtimeMs: number }[]>
+  /** CLAUDE_CONFIG_DIR, where this Claude Code keeps its sessions (unset: ~/.claude). */
+  configDir: () => Promise<string | undefined>
   write: (path: string, text: string) => Promise<void>
 }
 

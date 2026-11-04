@@ -22,6 +22,8 @@ export type EventBody =
   | { type: 'part.added'; part: Part }
   | { type: 'part.removed'; partId: Id; branchId: Id }
   | { type: 'turn.requested'; turn: Turn; consumed: Id[] }
+  /** A turn done elsewhere, brought in (branch.import). */
+  | { type: 'turn.imported'; turn: Turn }
   | { type: 'turn.released'; turnId: Id }
   | { type: 'turn.conflict'; turnId: Id; conflict: NonNullable<Turn['conflict']> }
   | { type: 'turn.resolved'; turnId: Id; pick: string; parts: Turn['parts']; mode: TurnMode }

@@ -72,6 +72,8 @@ export const register: Register = (on, options) => {
         return t
       },
       write: (path, text) => $.fs.write(path, text),
+      list: async (path) => (await $.fs.list(path)).map((x) => ({ name: x.name, kind: x.kind, size: x.size, mtimeMs: x.mtimeMs })),
+      configDir: () => $.env.get('CLAUDE_CONFIG_DIR'),
     }
     await rt.init(io, started.cwd || e.cwd)
     return started

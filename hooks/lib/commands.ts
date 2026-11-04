@@ -1,5 +1,5 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import type { FilesPush, Id, MemberId, MergeChoice, Policy, Role, Step, Turn, TurnFailure, Usage, Member } from './types.ts';
+import type { FilesPush, Id, ImportSource, ImportTurn, MemberId, MergeChoice, Policy, Role, Step, Turn, TurnFailure, Usage, Member } from './types.ts';
 
 /** What people (through the web app or claude.ai) and runners ask the server to do. */
 export type Command =
@@ -20,6 +20,8 @@ export type Command =
   | { type: 'branch.state'; branchId: Id; state: 'parked' | 'active' }
   | { type: 'branch.rename'; branchId: Id; name: string }
   | { type: 'branch.model'; branchId: Id; name: string; effort: 'low' | 'medium' | 'high' }
+  /** Brings a conversation had elsewhere into an empty main line, in order (several commands for a long one). */
+  | { type: 'branch.import'; branchId: Id; source: ImportSource; turns: ImportTurn[]; model?: string }
   // writing and sending
   /** `cites`: a finished turn from another branch, brought into this one with the part. */
   | { type: 'part.add'; branchId: Id; text: string; position?: boolean; id?: Id; cites?: Id }

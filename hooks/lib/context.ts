@@ -258,7 +258,11 @@ function fullTurn(s: SpaceState, t: Turn, nested = false): string {
   const answer = t.status === 'done' ? t.text : t.status === 'stopped' ? `${t.text} [stopped]` : `[${t.status}]`;
   // A turn that cites another brings it along (one level deep), so every session reads what it read.
   const cited = nested ? [] : citedTurns(s, t).map((c) => `(${memberName(s, c.by)} cited this turn from ${c.where}:)\n${fullTurn(s, c.turn, true)}`);
-  return [...cited, `${who}${steps}\nClaude (on ${memberName(s, t.runnerId)}'s machine): ${answer}`].join('\n\n');
+  // A turn brought in happened in that person's own conversation elsewhere, before it came here.
+  const where = t.imported
+    ? `in ${memberName(s, t.runnerId)}'s own ${t.imported.from === 'claude-code' ? 'Claude Code session' : 'claude.ai chat'}, before it was brought here`
+    : `on ${memberName(s, t.runnerId)}'s machine`;
+  return [...cited, `${who}${steps}\nClaude (${where}): ${answer}`].join('\n\n');
 }
 
 function fullTurns(s: SpaceState, turns: Turn[], cap: number): string {

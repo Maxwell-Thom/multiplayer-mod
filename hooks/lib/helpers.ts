@@ -1,5 +1,5 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import type { Branch, Decision, Id, MemberId, Note, Question, SpaceState, Turn } from './types.ts';
+import type { Branch, Decision, Id, ImportTurn, MemberId, Note, Question, SpaceState, Turn } from './types.ts';
 
 export const ACTIVE_STATUSES: Turn['status'][] = ['requested', 'held', 'conflict', 'running', 'approval', 'paused'];
 
@@ -255,4 +255,38 @@ export function approvalCard(tool: string, input: Record<string, unknown>): { ti
       return { title: m ? `Use ${m[2]} (${m[1]})` : `Use ${tool}`, detail };
     }
   }
+}
+
+/**
+ * A conversation being brought in (branch.import), cut to what one request to the server can
+ * carry, with a note where a long message was shortened, and grouped into requests of at most
+ * `maxTurns` turns and about `maxChars` characters (the server takes 256 KB a request).
+ */
+export function chunkImport<T extends ImportTurn>(turns: T[], o: { maxTurns?: number; maxChars?: number; maxPrompt?: number; maxText?: number; maxSteps?: number } = {}): { chunks: T[][]; shortened: number } {
+  const maxTurns = o.maxTurns ?? 150;
+  const maxChars = o.maxChars ?? 150_000;
+  const maxPrompt = o.maxPrompt ?? 40_000;
+  const maxText = o.maxText ?? 80_000;
+  const maxSteps = o.maxSteps ?? 200;
+  let shortened = 0;
+  const cut = (s: string, n: number) => {
+    if (s.length <= n) return s;
+    shortened++;
+    return `${s.slice(0, n)}\n\n[… ${s.length - n} more characters in the original]`;
+  };
+  const fitted: T[] = turns.map((t) => ({
+    ...t, prompt: cut(t.prompt, maxPrompt), text: cut(t.text, maxText),
+    ...(t.steps ? { steps: t.steps.length > maxSteps ? [...t.steps.slice(0, maxSteps - 1), { tool: 'More', text: `${t.steps.length - maxSteps + 1} more steps` }] : t.steps } : {}),
+  }));
+  const chunks: T[][] = [];
+  let cur: T[] = [];
+  let size = 0;
+  for (const t of fitted) {
+    const n = JSON.stringify(t).length;
+    if (cur.length && (cur.length >= maxTurns || size + n > maxChars)) { chunks.push(cur); cur = []; size = 0; }
+    cur.push(t);
+    size += n;
+  }
+  if (cur.length) chunks.push(cur);
+  return { chunks, shortened };
 }

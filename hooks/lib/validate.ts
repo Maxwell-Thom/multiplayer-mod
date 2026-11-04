@@ -14,6 +14,12 @@ import { isModelName, isSite } from './helpers.ts';
 type Spec = Record<string, string>;
 
 const TEXT = 'str:20000';
+
+/** What one branch.import may hold: turns per command, characters per prompt and answer, steps per turn. */
+export const IMPORT_CHUNK = 200;
+export const IMPORT_PROMPT = 100_000;
+export const IMPORT_TEXT = 200_000;
+export const IMPORT_STEPS = 300;
 const SPECS: Record<Command['type'], Spec> = {
   'member.rename': { name: 'str:80' },
   'member.notify': { notify: 'enum:needed|all|off' },
@@ -29,6 +35,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'branch.state': { branchId: 'id', state: 'enum:parked|active' },
   'branch.rename': { branchId: 'id', name: 'str:80' },
   'branch.model': { branchId: 'id', name: 'str:100', effort: 'enum:low|medium|high' },
+  'branch.import': { branchId: 'id', source: 'obj', turns: 'any', model: 'str:100?' },
   'part.add': { branchId: 'id', text: TEXT, position: 'bool?', id: 'id?', cites: 'id?' },
   'part.remove': { partId: 'id' },
   'turn.send': { branchId: 'id', mode: 'enum:normal|view-first?', handoffId: 'id?' },
@@ -126,6 +133,19 @@ export function invalid(cmd: unknown): string | null {
   if (cmd.type === 'merge.complete' && !Object.values(c.picks as object).every((v) => typeof v === 'boolean')) return 'Bad picks.';
   // A pinned model goes to Claude Code's --model on the runner's machine.
   if (cmd.type === 'branch.model' && c.name !== '' && !isModelName(c.name)) return 'Bad model.';
+  if (cmd.type === 'branch.import') {
+    const src = c.source as Record<string, unknown>;
+    if (!['claude-code', 'claude-ai'].includes(src.from as string) || (src.title !== undefined && (typeof src.title !== 'string' || src.title.length > 200))) return 'Bad source.';
+    if (c.model !== undefined && c.model !== '' && !isModelName(c.model)) return 'Bad model.';
+    if (!Array.isArray(c.turns) || !c.turns.length || c.turns.length > IMPORT_CHUNK) return 'Bad turns.';
+    for (const t of c.turns as unknown[]) {
+      if (!isObj(t) || typeof t.prompt !== 'string' || t.prompt.length > IMPORT_PROMPT || typeof t.text !== 'string' || t.text.length > IMPORT_TEXT) return 'Bad turn.';
+      if (t.model !== undefined && (typeof t.model !== 'string' || t.model.length > 100)) return 'Bad turn.';
+      if (t.at !== undefined && (typeof t.at !== 'number' || !Number.isFinite(t.at))) return 'Bad turn.';
+      if (t.steps !== undefined && (!Array.isArray(t.steps) || t.steps.length > IMPORT_STEPS
+        || !t.steps.every((st) => isObj(st) && typeof st.tool === 'string' && st.tool.length <= 100 && typeof st.text === 'string' && st.text.length <= 2000 && (st.failed === undefined || typeof st.failed === 'boolean')))) return 'Bad steps.';
+    }
+  }
   if (cmd.type === 'conversation.create' && c.model !== undefined && c.model !== '' && !isModelName(c.model)) return 'Bad model.';
   if (cmd.type === 'space.policy') {
     const p = c.policy as Record<string, unknown>;

@@ -23,7 +23,8 @@ import * as G from './git.ts'
 import type { Command } from './lib/commands.ts'
 import { buildSessionTurn, parseReplies } from './lib/context.ts'
 import type { FilesAction, FilesReport, SpaceEvent } from './lib/events.ts'
-import { clip, historyTurns, isActive, isMain, isOneOff, mainOf, memberName } from './lib/helpers.ts'
+import { clip, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName } from './lib/helpers.ts'
+import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './transcript.ts'
 import { apply } from './lib/reduce.ts'
 import type { Port } from './port.ts'
 import type { Branch, MemberId, Presence, RunnerInfo, SpaceState, Step, Turn, TurnFailure, TurnMode, Usage } from './lib/types.ts'
@@ -38,6 +39,8 @@ const STORE_PAUSED = 'paused'
 const STORE_NAME = 'name'
 /** Each branch's own Claude Code session on this machine, by `<space>:<branch>`. */
 const STORE_BRANCHES = 'branchSessions'
+/** The biggest session file the mod can read (Claude Code reads files for mods up to 4 MiB). */
+const SESSION_MAX_BYTES = 4 * 1024 * 1024
 /** This Claude Code's account sign-ins, one per server (from /multiplayer login). */
 const STORE_ACCOUNTS = 'accounts'
 
@@ -1114,6 +1117,7 @@ export class Runner {
         case 'share': return { text: this.cmdShare(rest.join(' ')) }
         case 'post': return { text: await this.cmdPost(rest.join(' ')) }
         case 'login': case 'sign-in': case 'signin': return { text: await this.cmdLogin() }
+        case 'import': case 'bring': return { text: await this.cmdImport(rest) }
         case 'logout': case 'sign-out': case 'signout': {
           const server = normalizeServer(this.opts.server)
           const had = this.account
@@ -1157,6 +1161,7 @@ export class Runner {
       '  /multiplayer join <code> [your name]                 join with a code like MC-7Q2X-K4MP',
       '  /multiplayer connect <pairing code>                  sign in as yourself after joining in the browser',
       '  /multiplayer login | logout                          sign this Claude Code in to your account (invite-only servers)',
+      '  /multiplayer import [session id]                     bring this Claude Code conversation (or another here) into a space',
       '  /multiplayer status | open | pause | resume | allow | deny | stop | share <what> | post [text] | take-home | leave',
       `Server: ${normalizeServer(this.opts.server)} (change it in /config, Multiplayer › Server URL)${this.account ? ` · signed in${this.account.email ? ` as ${this.account.email}` : ''}` : ''}.`,
     ].join('\n')
@@ -1343,6 +1348,141 @@ export class Runner {
     const s = await redeemPair(this.io.fetch, server, pair)
     const st = await this.signedIn(server, s)
     return `Signed in to “${st.spaceName ?? s.code}” as ${s.name}. Your turns now run in this Claude Code.`
+  }
+
+  // ------------------------------------------------------------- import
+
+  /** This folder's sessions, where Claude Code keeps them. */
+  private async sessionsDir(): Promise<string> {
+    const config = (await soft(() => this.io.configDir())) || `${this.home || '~'}/.claude`
+    return transcriptPath(config, this.cwd, 'x').replace(/\/x\.jsonl$/, '')
+  }
+
+  /** A session of this folder, read as turns; or why it can't be. */
+  private async readSession(id: string): Promise<ParsedSession | { error: string }> {
+    const dir = await this.sessionsDir()
+    const entry = (await soft(() => this.io.list(dir)))?.find((x) => x.name === `${id}.jsonl`)
+    if (!entry) return { error: `There's no Claude Code session ${id} in this folder. Run /multiplayer import in the folder (or the session) it belongs to.` }
+    if (entry.size > SESSION_MAX_BYTES) return { error: `That session is ${(entry.size / 1048576).toFixed(1)} MB; Multiplayer can bring in sessions up to 4 MB for now.` }
+    try {
+      return parseSession(await this.io.read(`${dir}/${id}.jsonl`))
+    } catch (err) {
+      return { error: `Couldn't read that session: ${(err as Error).message}` }
+    }
+  }
+
+  /** The newest few sessions of this folder that have something to bring in, for picking one. */
+  private async recentSessions(skip?: string): Promise<{ id: string; label: string }[]> {
+    const dir = await this.sessionsDir()
+    const files = ((await soft(() => this.io.list(dir))) ?? [])
+      .filter((x) => x.kind === 'file' && /^[0-9a-f-]{36}\.jsonl$/i.test(x.name) && x.size <= SESSION_MAX_BYTES && x.name !== `${skip}.jsonl`)
+      .sort((a, b) => b.mtimeMs - a.mtimeMs)
+      .slice(0, 8)
+    const out: { id: string; label: string }[] = []
+    for (const f of files) {
+      if (out.length >= 4) break
+      const id = f.name.slice(0, -6)
+      const s = await this.readSession(id)
+      if ('error' in s || !s.turns.length) continue
+      const when = new Date(f.mtimeMs).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      out.push({ id, label: `${clip(s.title, 50)} · ${s.turns.length} turn${s.turns.length === 1 ? '' : 's'} · ${when}` })
+    }
+    return out
+  }
+
+  /**
+   * /multiplayer import [session id] [--new | --here]: brings a Claude Code conversation into a
+   * space, exactly as it is: everyone sees every turn, and this person's Claude Code carries on
+   * from a copy of the session itself, forked at its last answer (the original isn't touched).
+   */
+  private async cmdImport(rest: string[]): Promise<string> {
+    const io = this.io
+    const server = normalizeServer(this.opts.server)
+    let id = rest.find((x) => /^[0-9a-f-]{36}$/i.test(x))
+    const flag = rest.includes('--new') ? 'new' : rest.includes('--here') ? 'here' : undefined
+    if (!id) {
+      const current = await soft(() => io.sessionId())
+      const own = current ? await this.readSession(current) : undefined
+      if (own && !('error' in own) && own.turns.length) id = current
+      else {
+        const recent = await this.recentSessions(current)
+        if (!recent.length) return 'This session has nothing to bring in yet, and there are no other Claude Code sessions in this folder. Run /multiplayer import inside the conversation you want to bring in.'
+        try {
+          const picked = await io.ask('Which Claude Code conversation should come in?', { options: recent.map((r) => r.label), header: 'Import' })
+          id = recent.find((r) => r.label === picked)?.id
+        } catch { return 'Nothing was brought in.' }
+        if (!id) return 'Nothing was brought in.'
+      }
+    }
+    if (!id) return 'Nothing was brought in.'
+    const sessionId: string = id
+    const parsed = await this.readSession(sessionId)
+    if ('error' in parsed) return parsed.error
+    if (!parsed.turns.length) return 'That session has no answered turns to bring in.'
+
+    // Where it goes: a new space, or a new conversation in the space this Claude Code is in.
+    const here = this.session && this.wire && this.state && !this.state.space.endedAt ? this.session : null
+    let where: 'new' | 'here' = flag === 'here' && here ? 'here' : 'new'
+    if (!flag && here) {
+      const spaceName = here.spaceName ?? this.state?.space.name ?? 'your space'
+      const inHere = `A new conversation in “${clip(spaceName, 40)}”`
+      try {
+        const picked = await io.ask(`Where should “${clip(parsed.title, 60)}” go? Everyone there will see the whole conversation.`, { options: [inHere, 'A new space'], header: 'Import' })
+        if (picked !== inHere && picked !== 'A new space') return 'Nothing was brought in.'
+        where = picked === inHere ? 'here' : 'new'
+      } catch { return 'Nothing was brought in.' }
+    }
+
+    if (where === 'here') return this.importInto(null, parsed, sessionId)
+    return this.withAccount(server, () => this.cmdImport([sessionId, '--new']), async (account) => {
+      const hostName = await this.askName()
+      const model = parsed.model && isModelName(parsed.model) ? parsed.model : await soft(() => io.model())
+      const s = await createSpace(io.fetch, server, { name: clip(parsed.title, 60), hostName, via: 'claude-code', model: model || undefined }, account)
+      await this.signedIn(server, s)
+      const st = this.state
+      const main = st ? mainOf(st, st.conversationOrder[0]) : undefined
+      if (!main) return 'The space started, but its conversation isn’t here yet. Run /multiplayer import again in a moment.'
+      return this.importInto(main.id, parsed, sessionId)
+    })
+  }
+
+  /** Sends the turns (into `branchId`, or a new conversation), then points the branch's session here at the original's fork. */
+  private async importInto(branchId: string | null, parsed: ParsedSession, sessionId: string): Promise<string> {
+    const w = this.wire
+    if (!w || !this.state) return 'Not connected to a space yet.'
+    const space = this.state.space.name
+    const title = clip(parsed.title, 120)
+    const model = parsed.model && isModelName(parsed.model) ? parsed.model : undefined
+    if (!branchId) {
+      const r = await w.command({ type: 'conversation.create', title, carry: false, filesFromMain: false, ...(model ? { model } : {}) })
+      const made = r.ok ? r.events?.find((e) => e.type === 'conversation.created') : undefined
+      if (!made || made.type !== 'conversation.created') return `Couldn’t start a conversation for it: ${r.error ?? 'no answer'}.`
+      branchId = made.conversation.mainBranchId
+    }
+    const { chunks, shortened } = chunkTurns(parsed.turns)
+    const at: Record<string, string> = {}
+    let through: string | null = null
+    let brought = 0
+    for (const [n, chunk] of chunks.entries()) {
+      const r = await w.command({ type: 'branch.import', branchId, source: { from: 'claude-code', title }, turns: chunk.map(({ uuid: _u, ...t }) => t), ...(n === 0 && model ? { model } : {}) })
+      if (!r.ok) {
+        return brought
+          ? `Brought in ${brought} of ${parsed.turns.length} turns, then the server refused the rest: ${r.error ?? 'no answer'}.`
+          : `Couldn’t bring it in: ${r.error ?? 'no answer'}.`
+      }
+      const ids = (r.events ?? []).filter((e) => e.type === 'turn.imported').map((e) => (e.type === 'turn.imported' ? e.turn.id : ''))
+      chunk.forEach((t, i) => { if (ids[i] && t.uuid) { at[ids[i]] = t.uuid; through = ids[i] } })
+      brought += chunk.length
+    }
+    // This branch's session here is the original, set aside at its last answer: the next turn
+    // forks it there (--resume … --fork-session --resume-session-at), so it carries on with all of it.
+    if (through) await this.saveBranchSession(branchId, { id: sessionId, through, at, rewind: true })
+    this.lastBranchId = branchId
+    this.refresh()
+    return [
+      `Brought “${clip(parsed.title, 60)}” into “${space}”: ${brought} turn${brought === 1 ? '' : 's'}${shortened ? ` (${shortened} very long message${shortened === 1 ? '' : 's'} shortened for the others)` : ''}.`,
+      'Everyone there sees the whole conversation. Your turns on it carry on here from a copy of this session; the session itself is left as it was.',
+    ].join('\n')
   }
 
   /** Where a note from this session goes: the shared branch this runner last ran, else the main line. */

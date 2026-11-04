@@ -187,6 +187,26 @@ export interface Turn {
   mergeId?: Id;
   /** Private turns (recaps, private lanes) are only visible to their runner. */
   private?: boolean;
+  /** Brought in from a conversation someone had elsewhere: done there, not run here. */
+  imported?: ImportSource;
+}
+
+/** Where a conversation brought into a space came from. */
+export interface ImportSource {
+  /** A Claude Code session (its owner's Claude Code carries on from a copy of it), or a claude.ai chat. */
+  from: 'claude-code' | 'claude-ai';
+  /** Its title there. */
+  title?: string;
+}
+
+/** One exchange of a conversation being brought in, as it happened there. */
+export interface ImportTurn {
+  prompt: string;
+  text: string;
+  steps?: { tool: string; text: string; failed?: boolean }[];
+  model?: string;
+  /** When it was asked there (ms). */
+  at?: number;
 }
 
 export type DecisionStatus = 'proposed' | 'approved' | 'replaced' | 'withdrawn';
