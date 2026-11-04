@@ -549,6 +549,10 @@ export class Runner {
     if (!a || !t || !w || !this.io.readBytes) return ['Sharing a file isn’t available here.', true]
     const raw = typeof m.input.path === 'string' ? m.input.path.trim() : ''
     if (!raw) return ['Give the file’s path.', true]
+    // A file outside the project, or a secret, only with its owner's say: this very call allowed
+    // in Multiplayer, or that kind shared for the space (docs/PRIVACY.md).
+    const src = privateSource('mcp__multiplayer__share_file', { path: raw }, this.cwd)
+    if (src && !m.approved && !this.state?.sharing?.[this.me]?.[src.id]) return [`${raw} is one of ${src.label}: it isn't shared from here unless its owner allows it in the space. Share a file in the project instead, or ask them.`, true]
     const path = /^([a-z]:)?[\\/]/i.test(raw) ? raw : `${this.cwd}/${raw}`
     const name = (typeof m.input.name === 'string' && m.input.name.trim()) || raw.split(/[\\/]/).pop() || 'file'
     let base64: string

@@ -91,6 +91,8 @@ export function privateSource(tool: string, input: unknown, cwd?: string): Priva
   if (m) {
     const [, server, name] = m;
     if (server === 'multiplayer') {
+      // Handing a file to everyone: one outside the project, or a secret, is private like reading it.
+      if (name === 'share_file') return fileSource(str('path'), cwd);
       // The person's claude.ai artifacts, lent to the turn: looking at them is reading their account.
       if ((name === 'Artifact' || name === 'ArtifactData' || name === 'ArtifactComments') && ARTIFACT_READS.has(str('action'))) {
         return { id: 'artifacts', kind: 'artifacts', name: 'Artifacts', label: 'your claude.ai artifacts' };
