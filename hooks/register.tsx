@@ -15,6 +15,29 @@ function canonical(v: unknown): string {
   return JSON.stringify(v) ?? 'null'
 }
 
+/**
+ * How long a request to the server may take. The host's fetch has no timeout, and a connection
+ * that died without closing (the server's container replaced, a network change) would hold a
+ * long poll forever: the runner looks gone, and hears no approval. A long poll gets its own wait
+ * and some; anything else, 45 seconds. A timed-out request fails like a dropped one, and the
+ * runner reconnects (the same process, so a running turn goes on).
+ */
+function fetchTimeout(url: string): number {
+  const wait = /\/runner\/poll\?.*\bwait=(\d+)/.exec(url)
+  return wait ? (Number(wait[1]) + 20) * 1000 : 45_000
+}
+
+function withTimeout<T>($: { clock: { after: (ms: number, fn: () => void) => unknown } }, p: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    let done = false
+    // The timer can be refused once the session is closing: that's no failure of the request.
+    Promise.resolve()
+      .then(() => $.clock.after(ms, () => { if (!done) { done = true; reject(new Error(`no answer from the server in ${Math.round(ms / 1000)}s`)) } }))
+      .catch(() => {})
+    p.then((v) => { if (!done) { done = true; resolve(v) } }, (err) => { if (!done) { done = true; reject(err) } })
+  })
+}
+
 const VIEW = { plugin: 'multiplayer', key: 'view' } as const
 const MEMO = { plugin: 'multiplayer', key: 'memo' } as const
 const view = atom(VIEW, EMPTY_VIEW)
@@ -52,7 +75,7 @@ export const register: Register = (on, options) => {
     }
     // Everything the runner does on the engine, each spelled as a call on `$`.
     const io: Port = {
-      fetch: (url, init) => $.http.fetch(url, init),
+      fetch: (url, init) => withTimeout($, $.http.fetch(url, init), fetchTimeout(url)),
       status: (text) => $.ui.status(text),
       toast: (text) => $.ui.toast(text, { timeoutMs: 6000 }),
       log: (text, debug) => $.ui.log(text, { to: debug ? 'debug' : 'transcript' }),
