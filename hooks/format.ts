@@ -47,6 +47,17 @@ export function describeTool(tool: string, input: Record<string, unknown>, cwd: 
   const path = (k: string) => sharePath(str(input[k]), cwd)
   switch (tool) {
     case 'ExitPlanMode': return 'Put the plan up for approval'
+    case 'AskUserQuestion': {
+      const qs = Array.isArray(input.questions) ? input.questions : []
+      const first = qs[0] && typeof qs[0] === 'object' ? str((qs[0] as Record<string, unknown>).question) : ''
+      return first ? `Ask: ${clip(first, 70)}` : 'Ask a question'
+    }
+    case 'EnterPlanMode': return 'Start planning'
+    case 'TaskCreate': case 'TaskUpdate': case 'TaskList': case 'TaskGet': return 'Update the task list'
+    case 'ToolSearch': return 'Look for a tool'
+    case 'Monitor': return `Watch ${clip(str(input.description) || 'something', 60)}`
+    case 'LSP': return 'Check the code'
+    case 'Workflow': return 'Run a workflow'
     case 'Read': return `Read ${path('file_path')}`
     case 'Write': return `Write ${path('file_path')}`
     case 'Edit': case 'MultiEdit': return `Edit ${path('file_path')}`
@@ -62,6 +73,13 @@ export function describeTool(tool: string, input: Record<string, unknown>, cwd: 
     default: {
       if (tool === 'mcp__multiplayer__propose_decision') return `Propose a decision: ${clip(str(input.text), 60)}`
       if (tool === 'mcp__multiplayer__add_question') return `Add an open question: ${clip(str(input.text), 60)}`
+      // Artifacts, made in the person's own Claude Code (BRIDGED_TOOLS).
+      if (tool === 'mcp__multiplayer__Artifact') {
+        const action = str(input.action) || 'publish'
+        return action === 'publish' ? (input.url ? 'Update an artifact' : 'Publish an artifact') : action === 'quickstart' ? 'Start an artifact' : `Artifacts: ${clip(action, 30)}`
+      }
+      if (tool === 'mcp__multiplayer__ArtifactData') return 'Change an artifact’s data'
+      if (tool === 'mcp__multiplayer__ArtifactComments') return 'Read or answer an artifact’s comments'
       const m = tool.match(/^mcp__(.+?)__(.+)$/)
       return m ? `Use ${m[2]} (${m[1]})` : `Use ${tool}`
     }
