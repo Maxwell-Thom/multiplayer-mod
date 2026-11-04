@@ -1077,6 +1077,7 @@ export class Runner {
       switch (sub.toLowerCase()) {
         case '': case 'pane': case 'show':
           if (this.session) await this.refreshPeople(true)
+          else await soft(() => this.serverInfo(normalizeServer(this.opts.server)))
           return { text: this.session ? this.statusText() : this.helpText(), openPane: true }
         case 'start': case 'new': return { text: await this.cmdStart(rest) }
         case 'join': return { text: await this.cmdJoin(rest) }
@@ -1134,7 +1135,9 @@ export class Runner {
           this.reset()
           return { text: `Forgot this Claude Code’s sign-in to “${name}”. You’re still a member; leave the space from the web app if you mean to.` }
         }
-        case 'help': return { text: this.helpText() }
+        case 'help':
+          await soft(() => this.serverInfo(normalizeServer(this.opts.server)))
+          return { text: this.helpText() }
         default: return { text: `Unknown subcommand “${sub}”. ${this.helpText()}` }
       }
     } catch (err) {
@@ -1155,6 +1158,8 @@ export class Runner {
   }
 
   private helpText(): string {
+    // The web app's help page, once the server has said where the web app is.
+    const web = this.servers.get(normalizeServer(this.opts.server))?.webUrl
     return [
       'Usage:',
       '  /multiplayer start <space name> [--as <your name>]   start a space; others join with its code',
@@ -1164,6 +1169,7 @@ export class Runner {
       '  /multiplayer import [session id]                     bring this Claude Code conversation (or another here) into a space',
       '  /multiplayer status | open | pause | resume | allow | deny | stop | share <what> | post [text] | take-home | leave',
       `Server: ${normalizeServer(this.opts.server)} (change it in /config, Multiplayer › Server URL)${this.account ? ` · signed in${this.account.email ? ` as ${this.account.email}` : ''}` : ''}.`,
+      ...(web ? [`Help, setup and updates: ${web.replace(/\/+$/, '')}/help`] : []),
     ].join('\n')
   }
 

@@ -23,18 +23,26 @@ While a session with the mod is open it:
 
 ## Install
 
-At the prompt of any Claude Code session:
+In a terminal:
 
+```sh
+claude plugin marketplace add Maxwell-Thom/multiplayer-mod
+claude plugin install multiplayer@multiplayer
 ```
-/plugin marketplace add Maxwell-Thom/multiplayer-mod
-/plugin install multiplayer@multiplayer
+
+Then start Claude Code (`claude`), or restart it if it was open, and sign it in with `/multiplayer login`: it shows a link and a code to approve in the web app. The same two commands work at the prompt of a running session as `/plugin marketplace add …` and `/plugin install …`; run `/reload-plugins` after.
+
+It connects to the hosted Multiplayer (https://maxwell-thom.github.io/multiplayer/) by default, which is invite only. Its help page, https://maxwell-thom.github.io/multiplayer/help, covers setting up and every command. For a server of your own, set **/config › Multiplayer › Server URL**.
+
+### Updates
+
+Claude Code doesn't update mods from other people's marketplaces until you turn that on: `/plugin` › **Marketplaces** › **multiplayer** › **Enable auto-update**. Or update by hand, then restart Claude Code:
+
+```sh
+claude plugin update multiplayer@multiplayer
 ```
 
-Or from a shell: `claude plugin marketplace add Maxwell-Thom/multiplayer-mod`, then `claude plugin install multiplayer@multiplayer`.
-
-It connects to the hosted Multiplayer (https://maxwell-thom.github.io/multiplayer/) by default. That one is invite only: `/multiplayer login` signs this Claude Code in, with a link you approve in the web app. For a server of your own, set **/config › Multiplayer › Server URL**.
-
-`Maxwell-Thom/multiplayer-mod` is a published copy. The mod is developed in `packages/mod` of the Multiplayer repository, and a workflow there copies it over on every change; `/plugin marketplace update multiplayer` picks up the new version.
+`Maxwell-Thom/multiplayer-mod` is a published copy. The mod is developed in `packages/mod` of the Multiplayer repository, and a workflow there copies it over on every change, with a new version (`0.1.<run>`): Claude Code keeps one copy per version, so an update only arrives when the version changes.
 
 ### From a clone (to work on the mod)
 
