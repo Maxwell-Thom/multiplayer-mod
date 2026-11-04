@@ -270,7 +270,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const source = { from: cmd.source.from, ...(cmd.source.title ? { title: clip(cmd.source.title.trim(), 200) } : {}) };
       const events: EventBody[] = [];
       if (!there.length) {
-        events.push(ev(ctx, b.id, 'download', `${memberName(s, actor)} brought in a conversation from ${source.from === 'claude-code' ? 'their Claude Code' : 'claude.ai'}${source.title ? `: “${clip(source.title, 80)}”` : ''}`));
+        events.push(ev(ctx, b.id, 'download', `${memberName(s, actor)} brought in a conversation from ${source.from === 'claude-code' ? 'Claude Code' : 'claude.ai'}${source.title ? `: “${clip(source.title, 80)}”` : ''}`));
         // It carries on on the model it was had on.
         if (cmd.model) events.push({ type: 'branch.model', branchId: b.id, model: { name: cmd.model, effort: b.model.effort, setBy: actor as MemberId, at: ctx.now } });
       }

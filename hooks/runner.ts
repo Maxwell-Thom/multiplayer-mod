@@ -1245,7 +1245,8 @@ export class Runner {
       this.io.toast(`Multiplayer: signed in${r.email ? ` as ${r.email}` : ''}.${then ? '' : ' Start or join a space with /multiplayer start or /multiplayer join.'}`)
       if (then) {
         const text = await then().catch((err: Error) => `Multiplayer: ${err.message}`)
-        this.io.log(text)
+        // A transcript line is one line: a line break there shows as a stray character.
+        this.io.log(text.replace(/\s*\n\s*/g, ' '))
       }
       this.refresh()
       return
