@@ -13,6 +13,10 @@ export type ParsedSession = {
   title: string
   /** The model it last answered on. */
   model?: string
+  /** The folder it ran in, as Claude Code recorded it. */
+  cwd?: string
+  /** A session Multiplayer ran for shared turns (its prompts start "[Multiplayer]"), not one the person had. */
+  multiplayer?: boolean
   turns: SessionTurn[]
 }
 
@@ -28,6 +32,7 @@ type Rec = {
   isVisibleInTranscriptOnly?: boolean
   turnOrigin?: string
   timestamp?: string
+  cwd?: string
   aiTitle?: string
   summary?: string
   message?: { role?: string; model?: string; content?: unknown }
@@ -109,7 +114,9 @@ export function parseSession(jsonl: string): ParsedSession {
     try { recs.push(JSON.parse(l) as Rec) } catch { /* a line being written as it was read */ }
   }
   let title = ''
+  let cwd: string | undefined
   for (const r of recs) {
+    if (!cwd && typeof r.cwd === 'string' && r.cwd) cwd = r.cwd
     if (r.type === 'ai-title' && typeof r.aiTitle === 'string' && r.aiTitle.trim()) title = r.aiTitle.trim()
     else if (!title && r.type === 'summary' && typeof r.summary === 'string') title = r.summary.trim()
   }
@@ -150,7 +157,8 @@ export function parseSession(jsonl: string): ParsedSession {
   const kept = turns.filter((t) => !(t.command && !t.uuid))
   while (kept.length && !kept[kept.length - 1].uuid) kept.pop()
   const out: SessionTurn[] = kept.map(({ command: _c, ids: _i, steps, ...t }) => ({ ...t, ...(steps?.length ? { steps } : {}) }))
-  return { title: title || clipLine(out[0]?.prompt ?? '') || 'Claude Code session', model, turns: out }
+  const multiplayer = turns.some((x) => x.prompt.startsWith('[Multiplayer]'))
+  return { title: title || clipLine(out[0]?.prompt ?? '') || 'Claude Code session', model, ...(cwd ? { cwd } : {}), ...(multiplayer ? { multiplayer } : {}), turns: out }
 }
 
 function clipLine(s: string, n = 80): string {

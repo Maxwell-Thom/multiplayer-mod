@@ -1,6 +1,6 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
 import type { Command } from './commands.ts';
-import type { FilesAction, FilesReport, LiveMessage, SpaceEvent } from './events.ts';
+import type { FilesAction, FilesReport, LiveMessage, LocalAction, LocalReport, SpaceEvent } from './events.ts';
 import type { Color, Id, MemberId, Presence, Role, RunnerInfo, SpaceState, Via } from './types.ts';
 import type { AskQuestion } from './helpers.ts';
 
@@ -79,6 +79,8 @@ export type RunnerOutbound =
   /** An answer typed at the runner (/multiplayer allow) to a permission question its turn's session asked. */
   | { kind: 'approval.answer'; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny'; answers?: Record<string, string> }
   | { kind: 'files.report'; requestId?: string; report: FilesReport }
+  /** My Claude Code conversations, for my web app only. */
+  | { kind: 'local.report'; requestId?: string; report: LocalReport }
   /** What a bridged tool answered, for the turn's session that asked. */
   | { kind: 'tool.result'; requestId: string; text: string; isError?: boolean };
 
@@ -93,6 +95,8 @@ export type RunnerInbound =
   /** `by`: who answered a shared one; `ok`: they approved or answered it (else declined or skipped). */
   | { kind: 'approval.cleared'; turnId: Id; requestId: string; by?: MemberId; ok?: boolean }
   | { kind: 'files.request'; requestId: string; action: FilesAction }
+  /** My web app asks about my Claude Code conversations (list them, or bring one in). */
+  | { kind: 'local.request'; requestId: string; action: LocalAction }
   /**
    * A turn's session calls a bridged tool: make the call in this Claude Code and answer with
    * tool.result. `approved`: its owner allowed exactly this call in Multiplayer, so their Claude
@@ -112,6 +116,7 @@ export type ClientMessage =
   /** `answers`: for Claude's question (AskUserQuestion), each question's text to the option(s) picked, or the person's own words. */
   | { kind: 'approval.answer'; turnId: Id; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny'; answers?: Record<string, string> }
   | { kind: 'files.request'; requestId: string; action: FilesAction }
+  | { kind: 'local.request'; requestId: string; action: LocalAction }
   | { kind: 'runner.pause' }
   | { kind: 'runner.resume' }
   | { kind: 'ping' };

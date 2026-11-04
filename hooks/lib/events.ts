@@ -84,6 +84,9 @@ export type LiveMessage =
   /** File work happens on each person's own machine: requests and reports go only between a person's web app and their runner. */
   | { kind: 'files.request'; requestId: string; action: FilesAction }
   | { kind: 'files.report'; requestId?: string; report: FilesReport }
+  /** My own Claude Code's conversations on my computer: asked for and answered only between my web app and my runner. */
+  | { kind: 'local.request'; requestId: string; action: LocalAction }
+  | { kind: 'local.report'; requestId?: string; report: LocalReport }
   | { kind: 'focus'; conversationId: Id; branchId: Id }
   | { kind: 'toast'; title: string; text?: string };
 
@@ -92,6 +95,40 @@ export type FilesAction =
   | { type: 'pull' }
   | { type: 'resolve'; picks: Record<string, 'mine' | 'theirs' | 'claude'> }
   | { type: 'combine' };
+
+/** What my web app asks my runner about my Claude Code conversations: the recent ones, or to bring one in here. */
+export type LocalAction =
+  | { type: 'list' }
+  | { type: 'bring'; sessionId: string };
+
+/** One of my Claude Code conversations on my computer, as my runner lists it. Only I ever see these. */
+export interface LocalSession {
+  /** Claude Code's session id. */
+  id: string;
+  /** Claude Code's own title for it, else its first prompt. */
+  title: string;
+  /** The folder it ran in, on my computer. */
+  folder: string;
+  /** It ran in the folder my runner is in, so my turns carry on from the session itself. */
+  here: boolean;
+  /** The Claude Code session I'm in right now. */
+  current?: boolean;
+  turns: number;
+  /** When it was last written to. */
+  at: number;
+}
+
+export interface LocalReport {
+  /** Newest first. */
+  sessions?: LocalSession[];
+  /** Sessions too long to bring in yet (over 4 MB). */
+  tooLong?: number;
+  /** A bring-in under way, or how it went. */
+  bringing?: string;
+  brought?: { sessionId: string; ok: boolean; text: string; conversationId?: Id; turns?: number };
+  error?: string;
+  at: number;
+}
 
 export interface FilesReport {
   state: 'clean' | 'incoming' | 'pulled' | 'conflict' | 'resolving' | 'resolved' | 'error' | 'no-repo';

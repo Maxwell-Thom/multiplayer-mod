@@ -1,6 +1,6 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
 import { branchDecisions, branchQuestions, clip, historyTurns, isOneOff, memberName, mainOf, isMain, noteLine, turnsOf, workFiles, workStatus } from './helpers.ts';
-import type { Id, MemberId, SpaceState, Turn } from './types.ts';
+import type { Decision, Id, MemberId, SpaceState, Turn } from './types.ts';
 
 /**
  * What a runner knows about its own folder, for "Where the code is". Everyone's Claude works
@@ -465,14 +465,25 @@ export function parseReplies(text: string, n: number): string[] {
   return out;
 }
 
-/** The recap a member asks for after being away: turns on main since they last looked. */
+/**
+ * The recap a member asks for after being away: turns on main since they last looked. Found live
+ * (PARITY #68): it gave a bare count of approved decisions across the whole space, so a recap
+ * asked seconds after Claude proposed D1 and D2 said "0 approved", which read as wrong once they
+ * were approved. It names this conversation's decisions by where they stand, as of now.
+ */
 export function recapBrief(s: SpaceState, conversationId: Id, sinceSeq: number): string {
   const main = mainOf(s, conversationId);
   const since = Object.values(s.turns).filter((t) => t.conversationId === conversationId && t.status === 'done' && !t.private && (t.endedAt ?? 0) > 0);
-  const decided = s.decisions.filter((d) => d.status === 'approved');
+  const here = main ? branchDecisions(s, main.id) : [];
+  const ids = (st: Decision['status']) => here.filter((d) => d.status === st).map((d) => d.id);
+  const approved = ids('approved');
+  const proposed = ids('proposed');
+  const list = (xs: string[]) => xs.length === 1 ? xs[0] : `${xs.slice(0, -1).join(', ')} and ${xs[xs.length - 1]}`;
+  const standing = !approved.length && !proposed.length ? 'No decisions yet.'
+    : [approved.length ? `approved: ${list(approved)}` : 'none approved yet', proposed.length ? `proposed and waiting for approval: ${list(proposed)}` : ''].filter(Boolean).join('; ');
   return [
     `Catch me up on this conversation since I was last here. Three to five short lines: what was decided (cite decision ids), what's still open, and anything I'm needed for.`,
     main ? `Main line: ${main.name}.` : '',
-    `There are ${since.length} finished turns and ${decided.length} approved decisions in total. I last saw event #${sinceSeq}.`,
+    `It has ${since.length} finished turn${since.length === 1 ? '' : 's'}. Decisions right now: ${standing}${standing.endsWith('.') ? '' : '.'} I last saw event #${sinceSeq}.`,
   ].filter(Boolean).join(' ');
 }

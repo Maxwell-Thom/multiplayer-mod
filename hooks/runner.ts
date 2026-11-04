@@ -22,7 +22,7 @@ import * as fmt from './format.ts'
 import * as G from './git.ts'
 import type { Command } from './lib/commands.ts'
 import { type FolderView, buildSessionTurn, parseReplies } from './lib/context.ts'
-import type { FilesAction, FilesReport, SpaceEvent } from './lib/events.ts'
+import type { FilesAction, FilesReport, LocalAction, LocalReport, LocalSession, SpaceEvent } from './lib/events.ts'
 import { type AskQuestion, clip, fileType, fmtSize, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName } from './lib/helpers.ts'
 import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './transcript.ts'
 import { apply } from './lib/reduce.ts'
@@ -47,6 +47,17 @@ const STORE_BRANCHES_BY_FOLDER = 'branchSessionsByFolder'
 const SESSION_MAX_BYTES = 4 * 1024 * 1024
 /** This Claude Code's account sign-ins, one per server (from /multiplayer login). */
 const STORE_ACCOUNTS = 'accounts'
+/** A Claude Code session's transcript file. */
+const SESSION_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i
+/** How many of the newest session files a listing looks at, and how many it lists. */
+const LOCAL_SCAN = 60
+const LOCAL_MAX = 25
+
+/** One folder, however it's spelled (Windows' folders don't care about case or slashes). */
+function folderKeyOf(p: string): string {
+  const c = p.replace(/\\/g, '/').replace(/\/+$/, '')
+  return /^[a-z]:/i.test(c) ? c.toLowerCase() : c
+}
 
 /** Said to the person when the sessions shared turns run in can't sign in. */
 export const SIGN_IN_HELP = 'Shared turns run in a Claude Code session of their own on this machine, and it can’t sign in. Run /login here (a token in CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY doesn’t reach sessions a mod starts).'
@@ -699,6 +710,7 @@ export class Runner {
       if (m.kind === 'approval.request') this.onApproval(m)
       else if (m.kind === 'approval.cleared') this.onApprovalCleared(m.turnId, m.requestId)
       else if (m.kind === 'files.request') void this.files(m.requestId, m.action)
+      else if (m.kind === 'local.request') void this.local(m.requestId, m.action)
       else if (m.kind === 'tool.request') void this.bridged(m)
       else if (m.kind === 'pause' || m.kind === 'resume') void this.setPaused(m.kind === 'pause')
     }
@@ -958,8 +970,7 @@ export class Runner {
 
   /** This folder, as the key its WorkEntry list is kept under. */
   private folderKey(): string {
-    const c = this.cwd.replace(/\\/g, '/').replace(/\/+$/, '')
-    return /^[a-z]:/i.test(c) ? c.toLowerCase() : c
+    return folderKeyOf(this.cwd)
   }
 
   private async workEntries(): Promise<WorkEntry[]> {
@@ -1942,6 +1953,97 @@ export class Runner {
     return out
   }
 
+  // ------------------------------------------------- my conversations, in the web app
+
+  /** Sessions read before, by file and when it was written: listing again reads only what changed. */
+  private localCache = new Map<string, { key: string; parsed: ParsedSession | null }>()
+  /** A bring-in under way from the web app (one at a time, so a second tap doesn't bring it twice). */
+  private bringing: string | null = null
+
+  /** Every session file of this Claude Code, from every folder, newest first. */
+  private async sessionFiles(): Promise<{ path: string; id: string; size: number; at: number }[]> {
+    const config = ((await soft(() => this.io.configDir())) || `${this.home || '~'}/.claude`).replace(/[\\/]+$/, '')
+    const root = `${config}/projects`
+    const out: { path: string; id: string; size: number; at: number }[] = []
+    for (const d of ((await soft(() => this.io.list(root))) ?? []).filter((x) => x.kind === 'dir')) {
+      for (const f of (await soft(() => this.io.list(`${root}/${d.name}`))) ?? []) {
+        if (f.kind === 'file' && SESSION_FILE.test(f.name)) out.push({ path: `${root}/${d.name}/${f.name}`, id: f.name.slice(0, -6), size: f.size, at: f.mtimeMs })
+      }
+    }
+    return out.sort((a, b) => b.at - a.at)
+  }
+
+  private async parsedFile(f: { path: string; size: number; at: number }): Promise<ParsedSession | null> {
+    const key = `${f.size}:${f.at}`
+    const kept = this.localCache.get(f.path)
+    if (kept?.key === key) return kept.parsed
+    let parsed: ParsedSession | null = null
+    try { parsed = parseSession(await this.io.read(f.path)) } catch { parsed = null }
+    if (this.localCache.size > 300) this.localCache.clear()
+    this.localCache.set(f.path, { key, parsed })
+    return parsed
+  }
+
+  /** A folder as its person reads it: their home folder as ~. */
+  private shortFolder(p: string): string {
+    const home = this.home ? folderKeyOf(this.home) : ''
+    const k = folderKeyOf(p)
+    return home && (k === home || k.startsWith(`${home}/`)) ? `~${p.replace(/\\/g, '/').slice(home.length)}` : p
+  }
+
+  /**
+   * This person's recent Claude Code conversations on this computer, from every folder (the
+   * terminal, the desktop app's Code tab and the IDE all keep them here), for their web app
+   * alone. Sessions Multiplayer ran for shared turns aren't theirs to bring in, so they're left out.
+   */
+  async localSessions(): Promise<{ sessions: LocalSession[]; tooLong: number }> {
+    const current = await soft(() => this.io.sessionId())
+    const sessions: LocalSession[] = []
+    let tooLong = 0
+    for (const f of (await this.sessionFiles()).slice(0, LOCAL_SCAN)) {
+      if (sessions.length >= LOCAL_MAX) break
+      if (f.size > SESSION_MAX_BYTES) { tooLong++; continue }
+      const s = await this.parsedFile(f)
+      if (!s || s.multiplayer || !s.turns.length) continue
+      const folder = s.cwd ?? ''
+      sessions.push({
+        id: f.id, title: clip(s.title, 120), folder: folder ? this.shortFolder(folder) : '',
+        here: !!folder && folderKeyOf(folder) === this.folderKey(), ...(f.id === current ? { current: true } : {}), turns: s.turns.length, at: Math.round(f.at),
+      })
+    }
+    return { sessions, tooLong }
+  }
+
+  /** The web app asks: list this person's conversations, or bring one in as a new conversation here. */
+  async local(requestId: string, action: LocalAction): Promise<void> {
+    const w = this.wire
+    if (!w) return
+    const send = (report: Omit<LocalReport, 'at'>) => w.live({ kind: 'local.report', requestId, report: { ...report, at: Date.now() } })
+    if (action.type === 'list') {
+      try { await send(await this.localSessions()) } catch (err) { await send({ error: `Couldn’t read your Claude Code conversations: ${(err as Error).message}` }) }
+      return
+    }
+    const id = action.sessionId
+    const fail = (text: string) => send({ brought: { sessionId: id, ok: false, text } })
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return void (await fail('That isn’t a Claude Code session.'))
+    if (this.bringing) return void (await fail('Another conversation is coming in. Try again when it’s in.'))
+    this.bringing = id
+    try {
+      const f = (await this.sessionFiles()).find((x) => x.id === id)
+      if (!f) return void (await fail('That conversation isn’t on this computer any more.'))
+      if (f.size > SESSION_MAX_BYTES) return void (await fail(`That conversation is ${(f.size / 1048576).toFixed(1)} MB; Multiplayer can bring in conversations up to 4 MB for now.`))
+      const parsed = await this.parsedFile(f)
+      if (!parsed || parsed.multiplayer) return void (await fail('That isn’t one of your own conversations.'))
+      if (!parsed.turns.length) return void (await fail('That conversation has no answered turns to bring in.'))
+      await send({ bringing: id })
+      const here = !!parsed.cwd && folderKeyOf(parsed.cwd) === this.folderKey()
+      const r = await this.importInto(null, parsed, id, { fork: here, folder: parsed.cwd ? this.shortFolder(parsed.cwd) : undefined })
+      await send({ brought: { sessionId: id, ok: r.ok, text: r.text, ...(r.conversationId ? { conversationId: r.conversationId } : {}), ...(r.turns ? { turns: r.turns } : {}) } })
+    } finally {
+      this.bringing = null
+    }
+  }
+
   /**
    * /multiplayer import [session id] [--new | --here]: brings a Claude Code conversation into a
    * space, exactly as it is: everyone sees every turn, and this person's Claude Code carries on
@@ -1985,7 +2087,7 @@ export class Runner {
       } catch { return 'Nothing was brought in.' }
     }
 
-    if (where === 'here') return this.importInto(null, parsed, sessionId)
+    if (where === 'here') return (await this.importInto(null, parsed, sessionId)).text
     return this.withAccount(server, () => this.cmdImport([sessionId, '--new']), async (account) => {
       const hostName = await this.askName()
       const model = parsed.model && isModelName(parsed.model) ? parsed.model : await soft(() => io.model())
@@ -1994,22 +2096,30 @@ export class Runner {
       const st = this.state
       const main = st ? mainOf(st, st.conversationOrder[0]) : undefined
       if (!main) return 'The space started, but its conversation isn’t here yet. Run /multiplayer import again in a moment.'
-      return this.importInto(main.id, parsed, sessionId)
+      return (await this.importInto(main.id, parsed, sessionId)).text
     })
   }
 
-  /** Sends the turns (into `branchId`, or a new conversation), then points the branch's session here at the original's fork. */
-  private async importInto(branchId: string | null, parsed: ParsedSession, sessionId: string): Promise<string> {
+  /**
+   * Sends the turns (into `branchId`, or a new conversation), then points the branch's session here
+   * at the original's fork. `fork: false`: the session ran in another folder, which Claude Code
+   * can't resume from here, so turns here carry on from the conversation as notes.
+   */
+  private async importInto(branchId: string | null, parsed: ParsedSession, sessionId: string, opts: { fork?: boolean; folder?: string } = {}): Promise<{ ok: boolean; text: string; conversationId?: string; turns?: number }> {
     const w = this.wire
-    if (!w || !this.state) return 'Not connected to a space yet.'
+    const no = (text: string) => ({ ok: false, text })
+    if (!w || !this.state) return no('Not connected to a space yet.')
+    const fork = opts.fork !== false
+    let conversationId = branchId ? this.state.branches[branchId]?.conversationId : undefined
     const space = this.state.space.name
     const title = clip(parsed.title, 120)
     const model = parsed.model && isModelName(parsed.model) ? parsed.model : undefined
     if (!branchId) {
       const r = await w.command({ type: 'conversation.create', title, carry: false, filesFromMain: false, ...(model ? { model } : {}) })
       const made = r.ok ? r.events?.find((e) => e.type === 'conversation.created') : undefined
-      if (!made || made.type !== 'conversation.created') return `Couldn’t start a conversation for it: ${r.error ?? 'no answer'}.`
+      if (!made || made.type !== 'conversation.created') return no(`Couldn’t start a conversation for it: ${r.error ?? 'no answer'}.`)
       branchId = made.conversation.mainBranchId
+      conversationId = made.conversation.id
     }
     const { chunks, shortened } = chunkTurns(parsed.turns)
     const at: Record<string, string> = {}
@@ -2019,8 +2129,8 @@ export class Runner {
       const r = await w.command({ type: 'branch.import', branchId, source: { from: 'claude-code', title }, turns: chunk.map(({ uuid: _u, ...t }) => t), ...(n === 0 && model ? { model } : {}) })
       if (!r.ok) {
         return brought
-          ? `Brought in ${brought} of ${parsed.turns.length} turns, then the server refused the rest: ${r.error ?? 'no answer'}.`
-          : `Couldn’t bring it in: ${r.error ?? 'no answer'}.`
+          ? { ok: false, text: `Brought in ${brought} of ${parsed.turns.length} turns, then the server refused the rest: ${r.error ?? 'no answer'}.`, conversationId, turns: brought }
+          : no(`Couldn’t bring it in: ${r.error ?? 'no answer'}.`)
       }
       const ids = (r.events ?? []).filter((e) => e.type === 'turn.imported').map((e) => (e.type === 'turn.imported' ? e.turn.id : ''))
       chunk.forEach((t, i) => { if (ids[i] && t.uuid) { at[ids[i]] = t.uuid; through = ids[i] } })
@@ -2028,13 +2138,16 @@ export class Runner {
     }
     // This branch's session here is the original, set aside at its last answer: the next turn
     // forks it there (--resume … --fork-session --resume-session-at), so it carries on with all of it.
-    if (through) await this.saveBranchSession(branchId, { id: sessionId, through, at, rewind: true })
+    if (through && fork) await this.saveBranchSession(branchId, { id: sessionId, through, at, rewind: true })
     this.lastBranchId = branchId
     this.refresh()
-    return [
+    const text = [
       `Brought “${clip(parsed.title, 60)}” into “${space}”: ${brought} turn${brought === 1 ? '' : 's'}${shortened ? ` (${shortened} very long message${shortened === 1 ? '' : 's'} shortened for the others)` : ''}.`,
-      'Everyone there sees the whole conversation. Your turns on it carry on here from a copy of this session; the session itself is left as it was.',
+      fork
+        ? 'Everyone there sees the whole conversation. Your turns on it carry on here from a copy of this session; the session itself is left as it was.'
+        : `Everyone there sees the whole conversation. It ran in another folder${opts.folder ? ` (${opts.folder})` : ''}, so your turns on it carry on in this folder from the conversation itself, as notes. Claude here reads this folder's files, not that one's.`,
     ].join('\n')
+    return { ok: true, text, conversationId, turns: brought }
   }
 
   /** Where a note from this session goes: the shared branch this runner last ran, else the main line. */
