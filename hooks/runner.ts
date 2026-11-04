@@ -879,14 +879,14 @@ export class Runner {
     // question on a shared branch is a fork of the shared session, so it keeps that session's setup.
     const personal = t.private && !(aside && !branch.private)
     const projectSetup = !personal && !!s.space.policy.projectSetup
-    // A plan turn starts in plan mode. A session resumed after one stays in plan mode, so the next
-    // turn that isn't one starts in the person's own default mode (never bypass).
-    const lastMine = historyTurns(s, branch.id).filter((x) => x.runnerId === this.me && x.id !== t.id).pop()
+    // Every turn starts in a mode of its own, so nothing an earlier turn left (plan mode, edits
+    // accepted for that turn) carries over: plan mode for a plan turn; otherwise the person's own
+    // default (default, acceptEdits or auto; never bypass), or plain default where the project's
+    // setup is used.
     const settings = (await soft(() => io.userSettings())) as { permissions?: { defaultMode?: unknown } } | undefined
     const ownMode = settings?.permissions?.defaultMode
-    const permissionMode = t.plan ? 'plan' as const
-      : lastMine?.plan ? (ownMode === 'acceptEdits' || ownMode === 'auto' ? ownMode : 'default' as const)
-      : undefined
+    const baseMode = !projectSetup && (ownMode === 'acceptEdits' || ownMode === 'auto') ? ownMode : 'default' as const
+    const permissionMode = t.plan ? 'plan' as const : baseMode
     const argv = [exe, ...childArgs({
       plan, permissionMode, model: branch.model.name || undefined, effort: branch.model.effort, system: st.system, name,
       mcpUrl: `${normalizeServer(this.session.server)}/mcp/turn/${this.session.spaceId}/${token}`,
