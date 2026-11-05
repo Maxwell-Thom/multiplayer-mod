@@ -278,7 +278,7 @@ export const register: Register = (on, options) => {
         {f.more ? <Text dimColor>{`  … ${f.more} earlier step${f.more === 1 ? '' : 's'}`}</Text> : null}
         {f.steps.map((st) => (
           <Text dimColor={st.state === 'done'}>
-            {st.under ? '    ⎿ ' : ''}<Text color={dot(st.state)}>⏺</Text>{` ${st.tool} ${st.text}${st.state === 'denied' ? ' (denied)' : st.state === 'fail' ? ' (failed)' : ''}`}
+            {st.under ? '    ⎿ ' : ''}<Text color={dot(st.state)}>⏺</Text>{` ${st.text || st.tool}${st.state === 'denied' ? ' (denied)' : st.state === 'fail' ? ' (failed)' : ''}`}
           </Text>
         ))}
         {f.text ? <Markdown text={f.text} /> : null}

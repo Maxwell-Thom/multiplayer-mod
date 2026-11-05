@@ -16,6 +16,12 @@ export function feedTurns(s: SpaceState, since: number): Turn[] {
   return Object.values(s.turns).filter((t) => t.requestedAt >= since).sort((a, b) => a.requestedAt - b.requestedAt)
 }
 
+/** What people wrote, as this terminal may draw it: no control characters or escapes; `block` keeps newlines and tabs. */
+// eslint-disable-next-line no-control-regex
+const CTRL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/g
+export const block = (s: string) => s.replace(CTRL, '')
+export const one = (s: string) => block(s).replace(/[\n\t]+/g, ' ')
+
 const secs = (ms: number) => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000))} s` : `${Math.floor(ms / 60_000)} min ${Math.round((ms % 60_000) / 1000)} s`)
 
 /**
@@ -23,19 +29,19 @@ const secs = (ms: number) => (ms < 60_000 ? `${Math.max(1, Math.round(ms / 1000)
  * so far, what people added while Claude worked, an approval waiting here, and one closing line.
  */
 export function feedOf(s: SpaceState, t: Turn, me: MemberId, o: { now: number; live?: string; approval?: MultiplayerFeed['approval'] }): MultiplayerFeed {
-  const who = (m: MemberId) => (m === me ? 'You' : memberName(s, m))
+  const who = (m: MemberId) => (m === me ? 'You' : one(memberName(s, m)))
   const b = s.branches[t.branchId]
   const conv = b ? s.conversations[b.conversationId]?.title ?? 'A conversation' : 'A conversation'
-  const where = b && !isMain(s, b.id) ? `${conv} · ${b.private ? 'your private lane' : b.name}` : conv
-  const runner = t.runnerId === me ? 'your Claude Code' : `${memberName(s, t.runnerId)}’s Claude Code`
+  const where = one(b && !isMain(s, b.id) ? `${conv} · ${b.private ? 'your private lane' : b.name}` : conv)
+  const runner = t.runnerId === me ? 'your Claude Code' : `${one(memberName(s, t.runnerId))}’s Claude Code`
   const held = t.parts.filter((p) => p.position).length
-  const parts = t.parts.filter((p) => !p.position).map((p) => ({ who: who(p.memberId), text: p.text }))
+  const parts = t.parts.filter((p) => !p.position).map((p) => ({ who: who(p.memberId), text: block(p.text) }))
   if (held) parts.push({ who: 'Opinions', text: `${held} held back until Claude answers` })
   const all = t.steps ?? []
-  const steps: MultiplayerFeedStep[] = all.slice(-FEED_STEPS).map((st) => ({ tool: st.tool, text: st.text, state: st.state, under: st.under !== undefined }))
+  const steps: MultiplayerFeedStep[] = all.slice(-FEED_STEPS).map((st) => ({ tool: one(st.tool), text: one(st.text), state: st.state, under: st.under !== undefined }))
   const taken = t.steersTaken ?? 0
   const active = ['requested', 'held', 'conflict', 'running', 'approval', 'paused'].includes(t.status)
-  const queued = (t.steers ?? []).filter((x) => !x.withdrawn && !x.carried).map((x) => ({ who: who(x.by), text: x.text, state: x.n > taken && active ? 'queued' as const : 'read' as const }))
+  const queued = (t.steers ?? []).filter((x) => !x.withdrawn && !x.carried).map((x) => ({ who: who(x.by), text: block(x.text), state: x.n > taken && active ? 'queued' as const : 'read' as const }))
   const ask = t.status === 'held' ? openAsks(s, t.id)[0] : undefined
   let status: MultiplayerFeed['status']
   let line: string
@@ -62,11 +68,11 @@ export function feedOf(s: SpaceState, t: Turn, me: MemberId, o: { now: number; l
     parts,
     runner,
     status,
-    line,
+    line: one(line),
     steps,
     more: Math.max(0, all.length - FEED_STEPS),
-    text: (status === 'running' || status === 'approval') && o.live ? o.live : t.text,
+    text: block((status === 'running' || status === 'approval') && o.live ? o.live : t.text),
     queued,
-    approval: o.approval ?? null,
+    approval: o.approval ? { ...o.approval, title: one(o.approval.title), ...(o.approval.always ? { always: one(o.approval.always) } : {}) } : null,
   }
 }
