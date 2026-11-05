@@ -155,7 +155,7 @@ export function newSessionId(): string {
 
 /** What a turn's session did, read from its stream-json output. Only the main loop counts, not subagents. */
 export type RunEvent =
-  /** `commands`: the commands and skills the session has (its slash_commands). */
+  /** `commands`: the skills the session has (its init's skills; slash_commands where it lists none). */
   | { kind: 'init'; sessionId: string; model: string; commands?: string[] }
   /** The text written so far, the part still streaming included. */
   | { kind: 'text'; text: string }
@@ -217,7 +217,9 @@ export class StreamReader {
     switch (m.type) {
       case 'system':
         if (m.subtype === 'init') {
-          const commands = Array.isArray(m.slash_commands) ? (m.slash_commands as unknown[]).filter((c): c is string => typeof c === 'string') : undefined
+          // The skills, which Claude can run when a prompt names one; Claude Code's own commands it can't (an older Claude Code that lists no skills: all of them).
+          const list = Array.isArray(m.skills) ? m.skills : m.slash_commands
+          const commands = Array.isArray(list) ? (list as unknown[]).filter((c): c is string => typeof c === 'string') : undefined
           return [{ kind: 'init', sessionId: str(m.session_id), model: str(m.model), ...(commands ? { commands } : {}) }]
         }
         if (m.subtype === 'notification' && !sub) {
