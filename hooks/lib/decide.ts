@@ -739,6 +739,17 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         const sends = !s.members[runner]?.leftAt && (!ctx.online || ctx.online.includes(runner));
         return ok(...out, ...moveEvents(s, ctx, b, to, 'moved', sends, a.id));
       }
+      // Run it in the folder this Claude Code is open in: that folder is the project's from now on
+      // (unless it has no git to say so; then each turn asks). No: back to its writers' box.
+      if (a.kind === 'project') {
+        const pt = s.turns[a.turnId];
+        if (!pt || pt.status !== 'held') return ok(...out);
+        if (!cmd.allow) return ok(...out, { type: 'turn.cancelled', turnId: pt.id, by: actor as MemberId, restore: restoreOf(ctx, pt) }, ev(ctx, pt.branchId, 'laptop', `${memberName(s, actor as MemberId)}’s Claude Code is open in another project, so the turn went back to the draft`));
+        const here = ctx.repos ? ctx.repos[actor as MemberId] : undefined;
+        const repo: EventBody[] = typeof here === 'string' ? [{ type: 'branch.repo', branchId: pt.branchId, repo: here }] : [];
+        const others = openAsks(s, pt.id).some((x) => x.id !== a.id);
+        return ok(...out, ...repo, ...(others ? [] : [{ type: 'turn.released' as const, turnId: pt.id, folderOk: true as const }]));
+      }
       // "Yes, and don't ask again for them here": their turns run in my Claude Code in this conversation.
       const t = s.turns[a.turnId];
       if (cmd.allow && cmd.always && a.kind === 'run-here' && t) out.push({ type: 'run.allowed', conversationId: t.conversationId, runnerId: actor as MemberId, memberId: a.from, on: true });
@@ -1073,6 +1084,18 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (away) return fail(`The work is still on its way to ${memberName(s, away.to)}’s Claude Code.`, 'busy');
       const lease = s.leases[t.branchId];
       if (lease && lease.turnId !== t.id && !isOneOff(t)) return fail('Another turn holds this branch.', 'busy');
+      // Bound for this Claude Code while it's open in another project's folder: its person says
+      // first (a yes makes this folder the project's), rather than running there unasked.
+      const tb = s.branches[t.branchId];
+      const here = ctx.repos ? ctx.repos[actor as MemberId] : undefined;
+      if (!isOneOff(t) && !t.folderOk && tb?.repo && here !== undefined && here !== tb.repo) {
+        const who = memberName(s, actor as MemberId);
+        return ok(
+          { type: 'turn.held', turnId: t.id },
+          { type: 'ask.created', ask: { id: ctx.id('a'), kind: 'project', from: t.senderId, to: actor as MemberId, branchId: tb.id, turnId: t.id, status: 'open', at: ctx.now } },
+          ev(ctx, tb.id, 'laptop', `${who}’s Claude Code is open in another project, so this turn waits for ${who} to say whether to run it there`),
+        );
+      }
       // Checked again as it starts: the branch may have switched to Fable since it was sent.
       const pinned = s.branches[t.branchId]?.model.name ?? '';
       const credits = creditsRefusalFor(s, cmd.model || pinned, actor as MemberId, t.senderId) ?? creditsRefusalFor(s, pinned, actor as MemberId, t.senderId);

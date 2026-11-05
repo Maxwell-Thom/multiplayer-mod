@@ -314,6 +314,8 @@ export interface Turn {
   steersTaken?: number;
   /** The last steer its session was handed (read or not): from there on, none can be taken back. */
   steersOut?: number;
+  /** Its runner's person said to run it in the folder their Claude Code is open in, another project's. */
+  folderOk?: boolean;
   failure?: TurnFailure;
   conflict?: { summary: string; conflicting: number[]; options: { key: string; label: string; memberId?: MemberId }[] };
   /** Set once people settled a conflict, so the runner doesn't check again. */
@@ -461,7 +463,8 @@ export interface Merge {
  */
 export interface Ask {
   id: Id;
-  kind: 'send-in-branch' | 'run-here' | 'move';
+  /** 'project': its turn is bound for this Claude Code, open in a folder of another project. */
+  kind: 'send-in-branch' | 'run-here' | 'move' | 'project';
   from: MemberId;
   to: MemberId;
   branchId: Id;

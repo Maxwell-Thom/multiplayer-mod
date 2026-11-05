@@ -276,7 +276,7 @@ export const register: Register = (on, options) => {
         {v.approval ? <Text color="warning">{fit(`Approve in the web app, or /multiplayer allow or deny: ${v.approval.title}`)}</Text> : null}
         {(v.asks ?? []).slice(0, 3).map((a) => (
           <Text color="warning">
-            {fit(`${a.from} wants to ${a.kind === 'run-here' ? 'send to your Claude Code' : `move “${a.space}”`} · /multiplayer allow or deny`)}
+            {fit(a.kind === 'project' ? `A turn in “${a.space}” is for this Claude Code, open in another project · /multiplayer allow or deny` : `${a.from} wants to ${a.kind === 'run-here' ? 'send to your Claude Code' : `move “${a.space}”`} · /multiplayer allow or deny`)}
           </Text>
         ))}
         <Text> </Text>

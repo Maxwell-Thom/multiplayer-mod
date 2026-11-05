@@ -41,7 +41,7 @@ export type EventBody =
   | { type: 'turn.requested'; turn: Turn; consumed: Id[] }
   /** A turn done elsewhere, brought in (branch.import). */
   | { type: 'turn.imported'; turn: Turn }
-  | { type: 'turn.released'; turnId: Id }
+  | { type: 'turn.released'; turnId: Id; folderOk?: true }
   | { type: 'turn.conflict'; turnId: Id; conflict: NonNullable<Turn['conflict']> }
   | { type: 'turn.resolved'; turnId: Id; pick: string; parts: Turn['parts']; mode: TurnMode }
   | { type: 'turn.cancelled'; turnId: Id; by: MemberId; restore: Part[] }
@@ -58,6 +58,8 @@ export type EventBody =
   /** Unread when the turn ended: `to` the next turn they started, or 'draft' (back as parts). */
   | { type: 'turn.steers-carried'; turnId: Id; ns: number[]; to: Id | 'draft' }
   | { type: 'turn.steers-out'; turnId: Id; through: number }
+  /** Back to waiting on a yes (its Claude Code is open in another project). */
+  | { type: 'turn.held'; turnId: Id }
   | { type: 'turn.done'; turnId: Id; text: string; usage?: Usage; model?: string; effort?: string; fast?: boolean; notices?: string[]; suggestion?: string; replies?: string[]; thinking?: string }
   | { type: 'turn.failed'; turnId: Id; failure: TurnFailure }
   | { type: 'turn.stopped'; turnId: Id; by: MemberId }

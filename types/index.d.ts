@@ -38,7 +38,7 @@ export type MultiplayerView = {
    * People asking this Claude Code something, oldest first: to run their turn here, or to move a
    * conversation. `space`: the conversation's title. (Absent in a view kept from before.)
    */
-  asks?: { from: string; kind: 'run-here' | 'move'; space: string }[]
+  asks?: { from: string; kind: 'run-here' | 'move' | 'project'; space: string }[]
 }
 
 /** What survives a hot reload of the module while a shared turn runs. */

@@ -204,7 +204,9 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
       return pushTimeline(s, t.branchId, { kind: 'turn', id: t.id });
     }
     case 'turn.released':
-      return patchTurn(s, e.turnId, { status: 'requested' });
+      return patchTurn(s, e.turnId, { status: 'requested', ...(e.folderOk ? { folderOk: true } : {}) });
+    case 'turn.held':
+      return patchTurn(s, e.turnId, { status: 'held' });
     case 'turn.conflict':
       return patchTurn(s, e.turnId, { status: 'conflict', conflict: e.conflict });
     case 'turn.resolved':

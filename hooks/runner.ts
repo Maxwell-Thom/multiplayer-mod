@@ -828,7 +828,7 @@ export class Runner {
     // A move that started a transfer brings the work with it; one without came from a Claude Code that was offline.
     const sending = new Set(events.flatMap((e) => (e.type === 'transfer.started' ? [e.transfer.branchId] : [])))
     for (const e of events) {
-      if (e.type === 'ask.created' && e.ask.to === this.me && (e.ask.kind === 'run-here' || e.ask.kind === 'move')) this.noticeAsk(e.ask)
+      if (e.type === 'ask.created' && e.ask.to === this.me && (e.ask.kind === 'run-here' || e.ask.kind === 'move' || e.ask.kind === 'project')) this.noticeAsk(e.ask)
       if (e.type === 'transfer.updated') this.transferUpdated(e.transferId, e.status)
       if (e.type === 'branch.runner' && e.runnerId === this.me && e.from && e.from !== this.me && !sending.has(e.branchId)) void this.arrived(e.branchId)
       if (e.type === 'member.updated' && e.memberId === this.me && e.patch.limit) {
@@ -1308,6 +1308,9 @@ export class Runner {
       if (started.ok) await soft(() => w.command({ type: 'runner.fail', turnId: t!.id, failure: { reason: 'error', detail: this.leftWhy } }))
       return this.drop(t.id)
     }
+    // Held instead of started (this Claude Code is open in another project: its person says
+    // first): picked up again as soon as it's released, with no wait.
+    if (started.ok && !token) return this.drop(t.id)
     if (!started.ok || !token || !branch) {
       this.cooldown.set(t.id, Date.now() + 15_000)
       io.log(`multiplayer: could not start ${this.label(t)}: ${started.error ?? 'no turn token'}`, true)
@@ -1690,7 +1693,7 @@ export class Runner {
     const s = this.state
     if (!s) return []
     return Object.values(s.asks)
-      .filter((a) => a.to === this.me && a.status === 'open' && (a.kind === 'run-here' || a.kind === 'move'))
+      .filter((a) => a.to === this.me && a.status === 'open' && (a.kind === 'run-here' || a.kind === 'move' || a.kind === 'project'))
       .sort((x, y) => x.at - y.at)
   }
 
@@ -1706,7 +1709,9 @@ export class Runner {
     if (!s) return
     const who = memberName(s, a.from)
     const conv = this.convTitle(a.branchId)
-    const [toast, ask] = a.kind === 'run-here'
+    const [toast, ask] = a.kind === 'project'
+      ? [`Multiplayer: a turn in “${conv}” is for this Claude Code, but it’s open in a folder of another project. Run it here anyway? Answer in the web app, or here with /multiplayer allow or /multiplayer deny.`, `Run a turn of “${conv}” in this folder, another project’s?`]
+      : a.kind === 'run-here'
       ? [`Multiplayer: ${who} wants to send to your Claude Code in “${conv}”. Answer in the web app, or here with /multiplayer allow (always: /multiplayer allow always) or /multiplayer deny.`, `Let ${who} send to your Claude Code?`]
       : a.moveTo === a.from
         ? [`Multiplayer: ${who} wants to move “${conv}” to their Claude Code. Answer in the web app, or here with /multiplayer allow or /multiplayer deny.`, `Let ${who} move “${conv}” to their Claude Code?`]
@@ -1726,6 +1731,7 @@ export class Runner {
     const forGood = allow && always && a.kind === 'run-here'
     const r = await w.command({ type: 'ask.answer', askId: a.id, allow, ...(forGood ? { always: true } : {}) })
     if (!r.ok) return `Couldn’t answer it: ${r.error}`
+    if (a.kind === 'project') return allow ? `Running it in this folder; “${conv}”’s turns run here from now on.` : `Said no: the prompt went back to the box in “${conv}”.`
     if (a.kind === 'run-here') return !allow ? `Said no: ${who}’s prompt went back to them.` : forGood ? `Allowed: ${who}’s turns in “${conv}” run here without asking.` : `Allowed: ${who}’s turn runs here.`
     if (a.moveTo === a.from) return allow ? `Allowed: “${conv}” moves to ${who}’s Claude Code.` : `Said no: “${conv}” stays in your Claude Code.`
     return allow ? `Took it: “${conv}” runs in your Claude Code now.` : `Said no: “${conv}” stays in ${who}’s Claude Code.`
@@ -2881,7 +2887,7 @@ export class Runner {
       people,
       turns,
       approval: pending ? { tool: pending.tool, title: pending.title } : null,
-      asks: s ? this.asksToMe().slice(0, 5).map((x) => ({ from: memberName(s, x.from), kind: x.kind === 'move' ? 'move' as const : 'run-here' as const, space: this.convTitle(x.branchId) })) : [],
+      asks: s ? this.asksToMe().slice(0, 5).map((x) => ({ from: memberName(s, x.from), kind: x.kind === 'move' ? 'move' as const : x.kind === 'project' ? 'project' as const : 'run-here' as const, space: this.convTitle(x.branchId) })) : [],
     }
   }
 
