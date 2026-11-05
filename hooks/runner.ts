@@ -460,7 +460,13 @@ export class Runner {
     const list = ((await soft(() => this.io.storeGet(STORE_SESSIONS))) as StoredSession[] | undefined) ?? []
     // Connected here: this folder's (a sign-in kept before, the folder it had).
     const kept = (Array.isArray(list) ? list : []).find((x) => x.spaceId === s0.spaceId && x.server === s0.server)
-    const s: StoredSession = { ...s0, folder: s0.folder ?? kept?.folder ?? this.folderKey() }
+    // Signed in again (brought to another folder): it keeps the name and web link it had.
+    const s: StoredSession = {
+      ...s0,
+      folder: s0.folder ?? kept?.folder ?? this.folderKey(),
+      ...(s0.spaceName ?? kept?.spaceName ? { spaceName: s0.spaceName ?? kept?.spaceName } : {}),
+      ...(s0.web ?? kept?.web ? { web: s0.web ?? kept?.web } : {}),
+    }
     const next = [s, ...(Array.isArray(list) ? list : []).filter((x) => !(x.spaceId === s.spaceId && x.server === s.server))].slice(0, 20)
     await this.io.storeSet(STORE_SESSIONS, next)
     await this.io.storeSet(STORE_ACTIVE, s.spaceId)
@@ -659,7 +665,15 @@ export class Runner {
     this.runners = snap.runners
     if (this.session && this.session.spaceName !== snap.state.space.name) {
       this.session = { ...this.session, spaceName: snap.state.space.name }
+      void this.rememberName(this.session)
     }
+  }
+
+  /** The space's name as the server has it, kept with its sign-in: other folders say it, and /multiplayer here <name> finds it. */
+  private async rememberName(s: StoredSession): Promise<void> {
+    const list = (await soft(() => this.io.storeGet(STORE_SESSIONS))) as StoredSession[] | undefined
+    if (!Array.isArray(list) || !list.some((x) => x.spaceId === s.spaceId && x.server === s.server)) return
+    await soft(() => this.io.storeSet(STORE_SESSIONS, list.map((x) => x.spaceId === s.spaceId && x.server === s.server ? { ...x, spaceName: s.spaceName } : x)))
   }
 
   async hello(): Promise<void> {
