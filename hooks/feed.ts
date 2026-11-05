@@ -18,7 +18,8 @@ export function feedTurns(s: SpaceState, since: number): Turn[] {
 
 /** What people wrote, as this terminal may draw it: no control characters or escapes; `block` keeps newlines and tabs. */
 // eslint-disable-next-line no-control-regex
-const CTRL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]/g
+// (Bidi controls and invisible format characters too: they can reorder or hide what a row shows.)
+const CTRL = /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g
 export const block = (s: string) => s.replace(CTRL, '')
 export const one = (s: string) => block(s).replace(/[\n\t]+/g, ' ')
 
