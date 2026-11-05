@@ -1340,7 +1340,7 @@ export class Runner {
   }
 
   private async reportPush(a: Active): Promise<void> {
-    const p = await soft(() => G.pushedSince(this.io, a.startHead))
+    const p = await soft(() => G.pushedSince(this.io, a.startHead, a.work0))
     const w = a.wire ?? this.wire
     if (!p || !w) return
     const n = p.commits.length

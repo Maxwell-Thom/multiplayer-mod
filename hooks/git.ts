@@ -346,7 +346,13 @@ export async function commitsHere(sh: Shell, shas: string[], since: number): Pro
 }
 
 /** After a shared turn: the commits it made, when they are all on the upstream branch. */
-export async function pushedSince(sh: Shell, startHead: string | null): Promise<{ branch: string; commits: { sha: string; subject: string }[] } | null> {
+/**
+ * What a turn pushed: its own commits on the branch it pushed. `start` (from workStart): commits
+ * already on the remote when the turn began, or someone else's, were pulled in, not pushed by it
+ * (found live: a turn that pulled two of the others' commits and pushed one of its own was
+ * reported as "pushed 3 commits").
+ */
+export async function pushedSince(sh: Shell, startHead: string | null, start?: { upstream: string | null; email: string } | null): Promise<{ branch: string; commits: { sha: string; subject: string }[] } | null> {
   if (!startHead) return null
   const now = await head(sh)
   if (!now || now === startHead) return null
@@ -354,8 +360,9 @@ export async function pushedSince(sh: Shell, startHead: string | null): Promise<
   if (!upstream) return null
   const ahead = await gitOk(sh, ['rev-list', '--count', '@{u}..HEAD'])
   if (ahead === null || Number(ahead) > 0) return null
-  const log = (await gitOk(sh, ['log', `--format=%H${SEP}%s`, '--max-count=50', `${startHead}..HEAD`])) ?? ''
-  const commits = commitsOf(log).map(({ sha, subject }) => ({ sha, subject }))
+  const log = (await gitOk(sh, ['log', `--format=%H${SEP}%s${SEP}%ae`, '--max-count=50', 'HEAD', `^${startHead}`, ...(start?.upstream ? [`^${start.upstream}`] : [])])) ?? ''
+  const email = start?.email.toLowerCase()
+  const commits = commitsOf(log).filter((c) => !email || !c.author || c.author.toLowerCase() === email).map(({ sha, subject }) => ({ sha, subject }))
   if (!commits.length) return null
   return { branch: (await branchName(sh)) ?? 'HEAD', commits }
 }
