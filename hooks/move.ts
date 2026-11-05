@@ -706,10 +706,10 @@ async function unpackPlain(sh: MoveShell, o: { folder: string; file: string; exp
  * went are set aside in a stash (never dropped, never cleaned). One edited since it was packed
  * stays as it is, named in `kept`. Without git, the files stay where they are.
  */
-export async function releaseWork(sh: MoveShell, o: { folder: string; paths: string[]; to: string; transferId: string }): Promise<{ kept: string[] }> {
+export async function releaseWork(sh: MoveShell, o: { folder: string; paths: string[]; to: string; transferId: string }): Promise<{ kept: string[]; noRepo?: true }> {
   const root = await gitText(sh, ['rev-parse', '--show-toplevel'], o.folder)
   const ref = `refs/multiplayer/out/${o.transferId}`
-  if (!root) return { kept: [] }
+  if (!root) return { kept: [], noRepo: true }
   if (!(await gitText(sh, ['rev-parse', '-q', '--verify', ref], root))) return { kept: [...o.paths] }
   const entries = (await entriesOf(sh, root, ref, [], true)) ?? []
   const asked = new Set(o.paths)

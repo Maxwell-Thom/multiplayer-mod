@@ -1604,6 +1604,9 @@ export class Runner {
     }
     for (const t of Object.values(s?.turns ?? {})) {
       if (!t.work?.uncommitted?.length || !(moved || workWhere(t) === this.me)) continue
+      // Without git, another Claude Code's turn names its files as they were there; here a copy
+      // may sit beside a file of this person's own by that name. What holds them here arrived.
+      if (t.work.noRepo && t.runnerId !== this.me) continue
       if (t.branchId === branchId) for (const f of t.work.uncommitted) out.add(f)
       else if (runsHere(t.branchId)) for (const f of t.work.uncommitted) others.add(f)
     }
@@ -1821,6 +1824,7 @@ export class Runner {
     await this.setArrived(branchId, null)
     const conv = this.convTitle(branchId)
     const kept = out?.kept ?? []
+    if (out?.noRepo) { this.io.toast(`Multiplayer: “${conv}” moved to ${name}’s Claude Code. Without git here, your copies of its files stay as they are.`); return }
     this.io.toast(`Multiplayer: “${conv}” moved to ${name}’s Claude Code. Your copy of its changes is set aside in git stash${kept.length ? `, except ${clip(kept.join(', '), 100)}, which changed since it was sent and stays as it is` : ''}.`)
   }
 
