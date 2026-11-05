@@ -198,7 +198,8 @@ async function filesThere(sh: MoveShell, base: string, paths: string[]): Promise
 
 /** A package.json whose scripts or hook settings differ between `before` (a commit, or none) and this entry. */
 async function packageRunsCode(sh: MoveShell, cwd: string, gitDir: string[], before: string | null, e: Entry): Promise<boolean> {
-  if (baseOf(e.path) !== 'package.json' || e.status === 'D') return false
+  // (As a disk reads the name: PACKAGE.JSON is package.json on most of them.)
+  if (diskName(baseOf(e.path)) !== 'package.json' || e.status === 'D') return false
   const read = async (sha: string | null) => (sha ? (await git(sh, [...gitDir, 'cat-file', 'blob', sha], { cwd })).out : '{}')
   const was = before ? await gitText(sh, [...gitDir, 'rev-parse', '-q', '--verify', `${before}:${e.path}`], cwd) : null
   const pick = (text: string) => {
@@ -780,7 +781,8 @@ export async function packFiles(sh: MoveShell, o: { folder: string; paths: strin
     // Run from the folder, the names in a file (a command line can't hold thousands), and the
     // archive by a relative path: GNU tar reads "C:/…" as another computer's path.
     const list = `${parentOf(o.out)}/files.list`
-    await sh.write(list, files.join('\n') + '\n')
+    // Each name as ./name: tar reads a line starting with "-" as an option.
+    await sh.write(list, files.map((f) => `./${f}`).join('\n') + '\n')
     const r = await sh.run(['tar', '-cf', relativePath(folder, slash(o.out)), '--no-recursion', '-T', list], { cwd: folder, timeoutMs: 300_000 })
     if (r.exitCode !== 0) return { error: `the files couldn’t be packed (${r.stderr.trim().split('\n')[0]?.slice(0, 120) || 'tar failed'})` }
   } catch {
