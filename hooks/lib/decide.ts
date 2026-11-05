@@ -45,9 +45,15 @@ function moving(s: SpaceState, branchId: Id) {
   return Object.values(s.transfers ?? {}).find((x) => x.branchId === branchId && !x.copy && (x.status === 'packing' || x.status === 'sending'));
 }
 
-/** Teleport's rule: the work moves only into a copy of the same project (when the server knows). */
+/**
+ * Teleport's rule: the work moves only into a copy of the same project (when the server knows).
+ * Once the branch has a project, it's the one its Claude Code is in now while that's connected
+ * (what the receiving end checks too), else the branch's record.
+ */
 function wrongProject(s: SpaceState, ctx: CommandContext, b: Branch, who: MemberId): string | null {
-  if (!b.repo || !ctx.repos || ctx.repos[who] === b.repo) return null;
+  if (!b.repo || !ctx.repos) return null;
+  const want = (b.runnerId ? ctx.repos[b.runnerId] : undefined) ?? b.repo;
+  if (ctx.repos[who] === want) return null;
   return who === ctx.actor
     ? 'Your Claude Code is in a folder that isn’t a copy of this project. Open Claude Code in your copy of it and try again.'
     : `${memberName(s, who)}’s Claude Code is in a folder that isn’t a copy of this project.`;
