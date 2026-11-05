@@ -98,7 +98,7 @@ export function childArgs(o: ChildOptions): string[] {
     '--name', cleanName(o.name),
     // `timeout`: its permission prompt waits for a person, silently. Claude Code gives up on an MCP
     // call that's quiet for 5 minutes (found live: an approval left 5 minutes failed); the server
-    // answers within 12 ("ask again"), so 15 is never reached.
+    // answers within 4 ("ask again"), so 15 is never reached.
     '--mcp-config', JSON.stringify({ mcpServers: { multiplayer: { type: 'http', url: o.mcpUrl, timeout: MCP_WAIT_MS } } }),
     '--permission-prompt-tool', TOOL_APPROVE,
     ...(o.permissionMode ? ['--permission-mode', o.permissionMode] : []),
