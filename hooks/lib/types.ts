@@ -523,7 +523,7 @@ export interface RunnerInfo {
   account?: string;
   cwd?: string;
   git?: { repo?: string; branch?: string; dirty?: boolean };
-  /** The project's fingerprint (16 hex of sha256 over the space id and its origin URL): for the server's move check, never shown to others. */
+  /** The project's fingerprint (16 hex of sha256 over the space id and its first commit): for the server's move check, never shown to anyone. */
   repo?: string;
   sandbox?: boolean;
   /** Not picking up turns until resumed. */
