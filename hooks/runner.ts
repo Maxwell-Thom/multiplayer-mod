@@ -1444,7 +1444,8 @@ export class Runner {
       const w = a.wire ?? this.wire
       this.handling.delete(a.turnId)
       const model = a.model || undefined
-      const answer = (text || result?.text || '').trim()
+      // Claude Code answers /compact with nothing: the turn says what it did.
+      const answer = (text || result?.text || '').trim() || (a.mode === 'compact' && result && !result.isError ? 'Compacted this conversation’s session.' : '')
       if (!w || a.stopped === 'takeover' || a.stopped === 'gone' || a.stopped === 'left') return
       if (a.stopped === 'server') {
         await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, model, ...(a.effort ? { effort: a.effort } : {}), ...ranWith(a) }, w)
