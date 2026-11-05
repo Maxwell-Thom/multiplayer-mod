@@ -2341,7 +2341,13 @@ export class Runner {
   private async notHereText(): Promise<string> {
     const others = await this.elsewhere()
     if (!others.length) return this.helpText()
-    const where = others.slice(0, 3).map((s) => `“${s.spaceName ?? 'a space'}”${s.folder ? ` (in ${s.folder})` : ''}`).join(', ')
+    // A sign-in kept by an older mod has no folder: the folder its turns last ran in.
+    const byFolder = ((await soft(() => this.io.storeGet(STORE_BRANCHES_BY_FOLDER))) ?? {}) as Record<string, Record<string, unknown>>
+    const ranIn = (s: StoredSession) => Object.entries(typeof byFolder === 'object' ? byFolder : {}).find(([, v]) => Object.keys(v ?? {}).some((k) => k.startsWith(`${s.spaceId}:`)))?.[0]
+    const where = others.slice(0, 3).map((s) => {
+      const folder = s.folder ?? ranIn(s)
+      return `“${s.spaceName ?? 'a space'}”${folder ? ` (in ${folder})` : ''}`
+    }).join(', ')
     return `This Claude Code isn’t in a space in this folder, so it runs no shared turns here. Yours: ${where}. /multiplayer here brings ${others.length === 1 ? 'it' : 'one (/multiplayer here <name>)'} to this folder.`
   }
 
