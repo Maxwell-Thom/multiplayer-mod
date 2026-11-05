@@ -110,7 +110,12 @@ export type RunnerInbound =
   /** Stop or start picking up turns (from the person's own web app). */
   | { kind: 'pause' }
   | { kind: 'resume' }
-  | { kind: 'wake' };
+  | { kind: 'wake' }
+  /** For the Claude Code mirror: a turn's live text (one it may see, run elsewhere), at most once a second. */
+  | { kind: 'delta'; turnId: Id; text: string }
+  /** …and who's here and writing, as browsers hear it. */
+  | { kind: 'presence'; presence: Presence }
+  | { kind: 'presence.gone'; memberId: MemberId };
 
 // ------------------------------------------------------------- WebSocket
 
