@@ -234,8 +234,14 @@ export const register: Register = (on, options) => {
     if (child || e.command || e.isMeta || e.origin?.kind !== 'composer' || !rt.followConv()) return next(e)
     const said = await rt.typed(e.text, e.wait)
     if (said === null) return next(e)
-    // Gone to the space: the box empties, as a sent prompt's does.
-    if (said.ok) await $.prompt.fill({ text: '', mode: 'replace' }).catch(() => undefined)
+    // Gone to the space: the box empties, as a sent prompt's does. (Claude Code puts a dropped
+    // prompt back in the box once this answers, so a moment later, and only if it still holds this line.)
+    if (said.ok) {
+      const sent = e.text.trim()
+      void $.clock.after(120, () => {
+        void $.prompt.read().then((box) => (box.text.trim() === sent ? $.prompt.fill({ text: '', mode: 'replace' }) : undefined)).catch(() => undefined)
+      })
+    }
     return { drop: said.text }
   })
 
