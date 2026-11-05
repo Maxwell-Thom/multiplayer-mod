@@ -20,15 +20,16 @@ import {
 } from './client.ts'
 import * as fmt from './format.ts'
 import * as G from './git.ts'
+import * as M from './move.ts'
 import type { Command } from './lib/commands.ts'
 import { type FolderView, buildSessionTurn, parseReplies } from './lib/context.ts'
 import type { FilesAction, FilesReport, LocalAction, LocalReport, LocalSession, SpaceEvent } from './lib/events.ts'
-import { type AskQuestion, clip, fileType, fmtSize, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName } from './lib/helpers.ts'
+import { type AskQuestion, clip, fileType, fmtSize, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName, workWhere } from './lib/helpers.ts'
 import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './transcript.ts'
 import { apply } from './lib/reduce.ts'
 import { insideFolder, privateSource, privateStepText } from './lib/privacy.ts'
 import type { Port } from './port.ts'
-import type { Branch, MemberId, Presence, RunnerInfo, SpaceState, Step, Turn, TurnFailure, TurnMode, TurnWork, Usage } from './lib/types.ts'
+import type { Ask, Branch, MemberId, Presence, RunnerInfo, SpaceState, Step, Turn, TurnFailure, TurnMode, TurnWork, Usage } from './lib/types.ts'
 import { FILE_MAX_BYTES, WORK_COMMITS_MAX, WORK_FILES_MAX } from './lib/types.ts'
 import { BRIDGED_TOOLS, type CommandResponse, type RunnerHello, type RunnerInbound } from './lib/wire.ts'
 
@@ -38,6 +39,14 @@ export const PANE = 'multiplayer'
 const STORE_SESSIONS = 'sessions'
 const STORE_ACTIVE = 'activeSpace'
 const STORE_PAUSED = 'paused'
+/** Changes a move brought that wait for the Files panel to resolve its conflicts, by folder. */
+const STORE_WAITING = 'movesWaiting'
+/** Branches whose changes left behind here the person chose to keep (/multiplayer keep-work). */
+const STORE_KEPT = 'keptWork'
+/** What moves brought into each folder, by branch: sent on when the work moves again. */
+const STORE_ARRIVED = 'arrived'
+/** Without git: each file's id as a move took it from each folder, by branch (a move back updates those). */
+const STORE_SENT = 'sentPlain'
 const STORE_NAME = 'name'
 /** Each branch's own Claude Code session on this machine, by `<space>:<branch>` (before they were kept per folder). */
 const STORE_BRANCHES = 'branchSessions'
@@ -57,7 +66,7 @@ const LOCAL_SCAN = 60
 const LOCAL_MAX = 25
 
 /** One folder, however it's spelled (Windows' folders don't care about case or slashes). */
-function folderKeyOf(p: string): string {
+export function folderKeyOf(p: string): string {
   const c = p.replace(/\\/g, '/').replace(/\/+$/, '')
   return /^[a-z]:/i.test(c) ? c.toLowerCase() : c
 }
@@ -74,7 +83,7 @@ const PARENT_PS = '(Get-CimInstance Win32_Process -Filter "ProcessId=$((Get-CimI
 const PARENT_SH = 'readlink "/proc/$PPID/exe" 2>/dev/null; ps -o comm= -p "$PPID" 2>/dev/null; command -v claude 2>/dev/null'
 
 export const EMPTY_VIEW: MultiplayerView = {
-  isSignedIn: false, space: '', code: '', link: '', me: '', status: 'not signed in', needsYou: false, people: [], turns: [], approval: null,
+  isSignedIn: false, space: '', code: '', link: '', me: '', status: 'not signed in', needsYou: false, people: [], turns: [], approval: null, asks: [],
 }
 
 export type Decision = 'allow-once' | 'allow-always' | 'deny'
@@ -405,6 +414,7 @@ export class Runner {
           needHello = false
           this.phase = 'online'
           this.react([])
+          void this.lateSend()
           void this.childProblem().then((p) => { if (p) this.io.log(`${p.reason === 'not-signed-in' ? SIGN_IN_HELP : p.detail}`) })
         }
         const r = await this.pollOnce(this.wait)
@@ -665,7 +675,9 @@ export class Runner {
     const focus = this.lastBranchId && this.state?.branches[this.lastBranchId]
       ? { conversationId: this.state.branches[this.lastBranchId].conversationId, branchId: this.lastBranchId }
       : undefined
-    return { kind: 'claude-code', version, model, cwd, git, sandbox, paused: this.paused, focus, ...(this.heldBusy ? { busy: true } : {}) }
+    // The project's fingerprint, for the server's check before work moves here (shown to nobody).
+    const repo = this.session ? await soft(() => G.repoPrint(io, this.session!.spaceId)) : undefined
+    return { kind: 'claude-code', version, model, cwd, git, sandbox, paused: this.paused, focus, ...(repo ? { repo } : {}), ...(this.heldBusy ? { busy: true } : {}) }
   }
 
   /** Tells the server whether a shared turn is waiting for the person's own prompt here. */
@@ -715,6 +727,8 @@ export class Runner {
       else if (m.kind === 'files.request') void this.files(m.requestId, m.action)
       else if (m.kind === 'local.request') void this.local(m.requestId, m.action)
       else if (m.kind === 'tool.request') void this.bridged(m)
+      else if (m.kind === 'transfer.send') void this.sendWork(m)
+      else if (m.kind === 'transfer.receive') void this.receiveWork(m)
       else if (m.kind === 'pause' || m.kind === 'resume') void this.setPaused(m.kind === 'pause')
     }
   }
@@ -731,7 +745,12 @@ export class Runner {
   }
 
   private react(events: SpaceEvent[]): void {
+    // A move that started a transfer brings the work with it; one without came from a Claude Code that was offline.
+    const sending = new Set(events.flatMap((e) => (e.type === 'transfer.started' ? [e.transfer.branchId] : [])))
     for (const e of events) {
+      if (e.type === 'ask.created' && e.ask.to === this.me && (e.ask.kind === 'run-here' || e.ask.kind === 'move')) this.noticeAsk(e.ask)
+      if (e.type === 'transfer.updated') this.transferUpdated(e.transferId, e.status)
+      if (e.type === 'branch.runner' && e.runnerId === this.me && e.from && e.from !== this.me && !sending.has(e.branchId)) void this.arrived(e.branchId)
       if (e.type === 'member.updated' && e.memberId === this.me && e.patch.limit) {
         this.io.toast('Multiplayer: your plan’s limit was reached; your turns go back to the draft until it resets.')
       }
@@ -917,7 +936,8 @@ export class Runner {
 
   /** Submits the next queued job once the session is idle. */
   async pump(): Promise<void> {
-    if (this.pumping) return
+    // A move's work is being applied or set aside in this folder: turns wait until it's done.
+    if (this.pumping || this.moveBusy) return
     this.pumping = true
     try {
       while (!this.active && !this.combine && this.queue.length) {
@@ -1030,7 +1050,8 @@ export class Runner {
     }
     const report = this.workReport(e)
     if (!report.noRepo && !report.uncommitted && !report.more && !report.commits) return
-    const r = await soft(() => w.command({ type: 'runner.work', turnId: a.turnId, work: report }))
+    const repo = (await soft(() => G.repoPrint(this.io, a.spaceId))) ?? undefined
+    const r = await soft(() => w.command({ type: 'runner.work', turnId: a.turnId, work: report, ...(repo ? { repo } : {}) }))
     if (r?.ok) e.sent = JSON.stringify(report)
     if (workPending(e) || !e.sent) await this.saveWork([...(await this.workEntries()).filter((x) => x.turnId !== e.turnId), e])
   }
@@ -1065,7 +1086,8 @@ export class Runner {
         const report = this.workReport(e)
         const said = JSON.stringify(report)
         if (said !== e.sent) {
-          const r = await soft(() => w.command({ type: 'runner.work', turnId: e.turnId, work: report }))
+          const repo = e.noRepo ? undefined : (await soft(() => G.repoPrint(this.io, spaceId))) ?? undefined
+          const r = await soft(() => w.command({ type: 'runner.work', turnId: e.turnId, work: report, ...(repo ? { repo } : {}) }))
           if (r?.ok) e.sent = said
           else if (r && !r.ok) continue
         }
@@ -1510,6 +1532,383 @@ export class Runner {
     return `Allowed: ${p.title.toLowerCase()} for ${a.label}${how}.`
   }
 
+  private approvalWaiting(): boolean {
+    return !!this.active && this.active.approvals.size > 0
+  }
+
+  // ======================================================= where the work runs
+
+  /** What people ask of this Claude Code that's still open: to run their turn here, or a move. Oldest first. */
+  private asksToMe(): Ask[] {
+    const s = this.state
+    if (!s) return []
+    return Object.values(s.asks)
+      .filter((a) => a.to === this.me && a.status === 'open' && (a.kind === 'run-here' || a.kind === 'move'))
+      .sort((x, y) => x.at - y.at)
+  }
+
+  private convTitle(branchId: string): string {
+    const s = this.state
+    const b = s && Object.hasOwn(s.branches, branchId) ? s.branches[branchId] : undefined
+    return (b && s?.conversations[b.conversationId]?.title) || 'this conversation'
+  }
+
+  /** Someone asks something of this Claude Code: said here the way Claude Code says a permission prompt. */
+  private noticeAsk(a: Ask): void {
+    const s = this.state
+    if (!s) return
+    const who = memberName(s, a.from)
+    const conv = this.convTitle(a.branchId)
+    const [toast, ask] = a.kind === 'run-here'
+      ? [`Multiplayer: ${who} wants to send to your Claude Code in “${conv}”. Answer in the web app, or here with /multiplayer allow (always: /multiplayer allow always) or /multiplayer deny.`, `Let ${who} send to your Claude Code?`]
+      : a.moveTo === a.from
+        ? [`Multiplayer: ${who} wants to move “${conv}” to their Claude Code. Answer in the web app, or here with /multiplayer allow or /multiplayer deny.`, `Let ${who} move “${conv}” to their Claude Code?`]
+        : [`Multiplayer: ${who} offers to move “${conv}” to your Claude Code. Take it in the web app, or here with /multiplayer allow, or /multiplayer deny.`, `Take “${conv}” from ${who}?`]
+    this.io.toast(toast)
+    void soft(() => this.io.notify?.(ask, 'Multiplayer'))
+  }
+
+  /** /multiplayer allow [always] or deny, for the oldest ask to this Claude Code. Null when none is open. */
+  private async answerAsk(allow: boolean, always: boolean): Promise<string | null> {
+    const a = this.asksToMe()[0]
+    const w = this.wire
+    const s = this.state
+    if (!a || !w || !s) return null
+    const who = memberName(s, a.from)
+    const conv = this.convTitle(a.branchId)
+    const forGood = allow && always && a.kind === 'run-here'
+    const r = await w.command({ type: 'ask.answer', askId: a.id, allow, ...(forGood ? { always: true } : {}) })
+    if (!r.ok) return `Couldn’t answer it: ${r.error}`
+    if (a.kind === 'run-here') return !allow ? `Said no: ${who}’s prompt went back to them.` : forGood ? `Allowed: ${who}’s turns in “${conv}” run here without asking.` : `Allowed: ${who}’s turn runs here.`
+    if (a.moveTo === a.from) return allow ? `Allowed: “${conv}” moves to ${who}’s Claude Code.` : `Said no: “${conv}” stays in your Claude Code.`
+    return allow ? `Took it: “${conv}” runs in your Claude Code now.` : `Said no: “${conv}” stays in ${who}’s Claude Code.`
+  }
+
+  /**
+   * This conversation's changed paths on a branch, here: the work ledger's (all of them), what the
+   * space was told of turns whose changes are on this computer, and everything moves brought here
+   * for it. A file another branch running here changed too stays out of a move (it's that branch's
+   * as much). `moved`: after a move, for setting aside (releaseWork only touches what was sent).
+   */
+  private async workPaths(branchId: string, moved = false): Promise<string[]> {
+    const s = this.state
+    const spaceId = this.session?.spaceId
+    const out = new Set<string>()
+    const others = new Set<string>()
+    const runsHere = (id: string) => !!s && s.branches[id]?.runnerId === this.me && s.branches[id]?.state !== 'merged'
+    for (const e of await this.workEntries()) {
+      const t = s?.turns[e.turnId]
+      if (e.spaceId !== spaceId || !t) continue
+      if (t.branchId === branchId) for (const f of e.files) out.add(f)
+      else if (runsHere(t.branchId)) for (const f of e.files) others.add(f)
+    }
+    for (const t of Object.values(s?.turns ?? {})) {
+      if (!t.work?.uncommitted?.length || !(moved || workWhere(t) === this.me)) continue
+      if (t.branchId === branchId) for (const f of t.work.uncommitted) out.add(f)
+      else if (runsHere(t.branchId)) for (const f of t.work.uncommitted) others.add(f)
+    }
+    for (const a of await this.arrivedHere()) if (a.spaceId === spaceId && a.branchId === branchId) for (const f of a.paths) out.add(f)
+    if (!moved) for (const f of others) out.delete(f)
+    return [...out]
+  }
+
+  /** What moves brought into this folder, by branch (all of it: the space names at most 20 files a turn). */
+  private async arrivedHere(): Promise<{ spaceId: string; branchId: string; paths: string[]; at: number }[]> {
+    const all = ((await soft(() => this.io.storeGet(STORE_ARRIVED))) ?? {}) as Record<string, { spaceId: string; branchId: string; paths: string[]; at: number }[]>
+    return Array.isArray(all[this.folderKey()]) ? all[this.folderKey()] : []
+  }
+
+  private async setArrived(branchId: string, paths: string[] | null): Promise<void> {
+    const all = ((await soft(() => this.io.storeGet(STORE_ARRIVED))) ?? {}) as Record<string, { spaceId: string; branchId: string; paths: string[]; at: number }[]>
+    const spaceId = this.session?.spaceId ?? ''
+    const key = this.folderKey()
+    const rest = (all[key] ?? []).filter((a) => !(a.spaceId === spaceId && a.branchId === branchId))
+    all[key] = paths?.length ? [...rest, { spaceId, branchId, paths: paths.slice(0, 5000), at: Date.now() }].slice(-20) : rest
+    await soft(() => this.io.storeSet(STORE_ARRIVED, all))
+  }
+
+  /** A move's work, applied or set aside here, waits for the turn this Claude Code is running: one thing at a time in its folder. */
+  private async inFolder<T>(work: () => Promise<T>): Promise<T> {
+    for (let i = 0; this.active && i < 900; i++) await soft(() => this.io.sleep(1000))
+    this.moveBusy++
+    try {
+      return await work()
+    } finally {
+      this.moveBusy--
+      if (!this.moveBusy) this.pickUp()
+    }
+  }
+
+  /** This transfer's folder (kept out of git), or null for an id that isn't a plain one. */
+  private moveDir(transferId: string): string | null {
+    return /^[A-Za-z0-9_-]{1,80}$/.test(transferId) ? `${this.cwd.replace(/\\/g, '/').replace(/\/+$/, '')}/.multiplayer/moves/${transferId}` : null
+  }
+
+  private async onWindows(): Promise<boolean> {
+    return /^[A-Za-z]:/.test((await soft(() => this.io.systemRoot())) ?? '')
+  }
+
+  /** Deletes a transfer's folder when it's done (only one of these: the engine itself deletes nothing). */
+  private async removeMoveDir(dir: string): Promise<void> {
+    const base = `${this.cwd.replace(/\\/g, '/').replace(/\/+$/, '')}/.multiplayer/moves/`
+    if (!dir.startsWith(base) || !/^[A-Za-z0-9_-]+$/.test(dir.slice(base.length))) return
+    const root = (await soft(() => this.io.systemRoot()))?.replace(/\\+$/, '')
+    if (root && /^[A-Za-z]:\\[^"%]*$/.test(root)) {
+      if (/["%]/.test(dir)) return
+      await soft(() => this.io.run([`${root}\\System32\\cmd.exe`, '/d', '/c', 'rmdir', '/s', '/q', dir.replace(/\//g, '\\')], { timeoutMs: 60_000 }))
+    } else {
+      await soft(() => this.io.run(['rm', '-rf', '--', dir], { timeoutMs: 60_000 }))
+    }
+  }
+
+  /** This member's token as a header, for curl's input (`-H @-`): never on a command line, never in a file. */
+  private authHeader(): string | null {
+    const ses = this.session
+    return ses ? `Authorization: Bearer ${ses.token}\n` : null
+  }
+
+  private transferUrl(transferId: string, n?: number): string {
+    const ses = this.session!
+    return `${normalizeServer(ses.server)}/api/spaces/${ses.spaceId}/transfer/${transferId}${n === undefined ? '' : `/${n}`}`
+  }
+
+  /** A move: pack this branch's work, say what it will send, then send it in parts through the relay. */
+  private async sendWork(m: Extract<RunnerInbound, { kind: 'transfer.send' }>): Promise<void> {
+    const w = this.wire
+    const s = this.state
+    const ses = this.session
+    const dir = this.moveDir(m.transferId)
+    if (!w || !s || !ses || !dir) return
+    const fail = (summary: string) => soft(() => w.command({ type: 'runner.transfer', transferId: m.transferId, status: 'failed', summary: clip(summary, 200) }))
+    try {
+      // A copy of one turn's files for someone's browser is a plain .tar; a move is the whole work, for a Claude Code.
+      const file = `${dir}/${m.copy ? 'files.tar' : 'work.bundle'}`
+      const packed = m.copy
+        ? await M.packFiles(this.io, { folder: this.cwd, paths: await this.copyPaths(m.copy), out: file }).catch((err: Error) => ({ error: err.message || 'packing failed' }))
+        : await M.packWork(this.io, {
+          folder: this.cwd, paths: await this.workPaths(m.branchId), out: file, transferId: m.transferId,
+          repo: (await soft(() => G.repoPrint(this.io, ses.spaceId))) ?? null, from: memberName(s, this.me),
+        }).catch((err: Error) => ({ error: err.message || 'packing failed' }))
+      if ('error' in packed) { await fail(packed.error); return }
+      const chunks = Math.max(1, Math.ceil(packed.bytes / M.MOVE_PART_BYTES))
+      const ready = await w.command({ type: 'runner.transfer', transferId: m.transferId, status: 'ready', manifest: { size: packed.bytes, sha256: packed.sha256, chunks } })
+      if (!ready.ok) return
+      const auth = this.authHeader()
+      if (!auth) return
+      // Without git: each file's id as it leaves, so a move back updates what nobody touched since.
+      if (!m.copy && 'sent' in packed && packed.sent) await this.setSent(m.branchId, packed.sent)
+      for (let n = 0; n < chunks; n++) {
+        if (!(await M.cutPart(this.io, file, n, packed.bytes, `${dir}/part`))) { await fail('a part of it couldn’t be read'); return }
+        const sent = await this.putPart(this.transferUrl(m.transferId, n), `${dir}/part`, auth)
+        if (sent !== true) { await fail(sent); return }
+      }
+      if (packed.left.length && !m.copy) this.io.toast(`Multiplayer: ${clip(packed.left.join(', '), 120)} stayed on this computer (private, ignored or kept by git LFS).`)
+      if (m.copy && this.state) this.io.toast(`Multiplayer: sent a copy of ${packed.left.length ? 'some of ' : ''}a turn’s files to ${memberName(this.state, m.to)}’s browser${packed.left.length ? ` (not ${clip(packed.left.join(', '), 100)})` : ''}.`)
+    } finally {
+      await this.removeMoveDir(dir)
+    }
+  }
+
+  /**
+   * What a copy may send: only files that turn wrote in this very folder, as this Claude Code's own
+   * ledger has them (it may be open in another folder now, where the same names are other files).
+   */
+  private async copyPaths(copy: { turnId: string; paths: string[] }): Promise<string[]> {
+    const tidy = (p: string) => p.replace(/\\/g, '/').replace(/\/+$/, '')
+    const here = tidy(this.cwd)
+    const mine = (await this.workEntries()).find((e) => e.turnId === copy.turnId && e.noRepo && tidy(e.root) === here)
+    const wrote = new Set(mine?.files ?? [])
+    return copy.paths.filter((p) => wrote.has(p))
+  }
+
+  /** One part, PUT with curl; waits while the other side hasn't taken the parts before it. */
+  private async putPart(url: string, part: string, auth: string): Promise<true | string> {
+    const until = Date.now() + 10 * 60_000
+    for (;;) {
+      const r = await soft(() => this.io.run(['curl', '-sS', '-f', '-o', `${part}.out`, '-w', '%{http_code}', '--max-time', '120', '-X', 'PUT', '-T', part, '-H', '@-', '-H', 'content-type: application/octet-stream', url], { stdin: auth, timeoutMs: 130_000 }))
+      if (r?.exitCode === 0) return true
+      const code = Number(r?.stdout.trim()) || 0
+      if ((code === 409 || code === 503) && Date.now() < until) { await soft(() => this.io.sleep(1000)); continue }
+      return code === 404 ? 'the move was called off' : code ? `the server said ${code}` : 'it couldn’t reach the server'
+    }
+  }
+
+  /** A move's work is on its way here: take it in one download, check it, and bring it in. */
+  private async receiveWork(m: Extract<RunnerInbound, { kind: 'transfer.receive' }>): Promise<void> {
+    const w = this.wire
+    const ses = this.session
+    const dir = this.moveDir(m.transferId)
+    if (!w || !ses || !dir) return
+    const done = (status: 'done' | 'failed', summary: string) => soft(() => w.command({ type: 'runner.transfer', transferId: m.transferId, status, summary: clip(summary, 200) }))
+    try {
+      await this.io.write(`${dir}/.gitignore`, '*\n')
+      const auth = this.authHeader()
+      if (!auth) return
+      const file = `${dir}/work.bundle`
+      // Railway ends a request at 15 minutes and the engine a process at 10: 200 MB needs about 0.4 MB/s.
+      const r = await soft(() => this.io.run(['curl', '-sS', '-f', '--max-time', '590', '-H', '@-', '-o', file, this.transferUrl(m.transferId)], { stdin: auth, timeoutMs: 600_000 }))
+      if (r?.exitCode !== 0) { await done('failed', 'it didn’t all arrive'); return }
+      const list = await soft(() => this.io.list(dir))
+      const size = list?.find((e) => e.name === 'work.bundle')?.size
+      if (size !== m.manifest.size || (await M.fileSha(this.io, file)) !== m.manifest.sha256) { await done('failed', 'what arrived wasn’t what was sent'); return }
+      const sent = (await this.sentFrom())[m.branchId]
+      let came: string[] = []
+      const out = await this.inFolder(async () => M.unpackWork(this.io, {
+        folder: this.cwd, file, expectRepo: (await soft(() => G.repoPrint(this.io, ses.spaceId))) ?? null, transferId: m.transferId, windows: await this.onWindows(),
+        ...(sent ? { sent } : {}), onArrived: (paths) => { came = paths },
+      }).catch((err: Error) => ({ error: err.message || 'it couldn’t be unpacked' })))
+      if ('error' in out) {
+        // Its Claude Code can send it again once this folder's ready: /multiplayer get-work, or the web app.
+        this.io.toast(`Multiplayer: the work from ${this.state ? memberName(this.state, m.from) : 'them'} couldn’t come in. ${out.error} Then /multiplayer get-work to have it sent again.`)
+        this.retryBranch = m.branchId
+        await done('failed', out.error.replace(/\.$/, ''))
+        return
+      }
+      if (came.length) await this.setArrived(m.branchId, came)
+      if (out.conflict) await this.waitForFiles(m.transferId, m.branchId)
+      this.io.toast(`Multiplayer: the work is here. ${out.summary}.`)
+      await done('done', out.summary)
+    } finally {
+      await this.removeMoveDir(dir)
+    }
+  }
+
+  /** Changes that wait for the Files panel to resolve a move's conflicts, by folder. */
+  private async waitForFiles(transferId: string, branchId: string): Promise<void> {
+    const all = ((await soft(() => this.io.storeGet(STORE_WAITING))) ?? {}) as Record<string, { transferId: string; branchId: string; spaceId: string }[]>
+    const key = this.folderKey()
+    all[key] = [...(all[key] ?? []), { transferId, branchId, spaceId: this.session?.spaceId ?? '' }].slice(-10)
+    await soft(() => this.io.storeSet(STORE_WAITING, all))
+  }
+
+  /** The Files panel resolved: what a move brought that waited comes in now. */
+  private async applyWaiting(): Promise<void> {
+    const all = ((await soft(() => this.io.storeGet(STORE_WAITING))) ?? {}) as Record<string, { transferId: string; branchId: string; spaceId: string }[]>
+    const key = this.folderKey()
+    const list = all[key] ?? []
+    if (!list.length) return
+    const keep: typeof list = []
+    for (const x of list) {
+      const r = await soft(() => M.applySnapshot(this.io, { folder: this.cwd, transferId: x.transferId }))
+      if (!r) { keep.push(x); continue }
+      if ('error' in r) { if (r.error !== 'Nothing is waiting to come in.') keep.push(x); continue }
+      this.io.toast(`Multiplayer: ${r.summary}.`)
+      if (x.spaceId === this.session?.spaceId && this.state) {
+        await soft(() => this.wire?.command({ type: 'runner.arrived', branchId: x.branchId, pulled: 0, note: `${memberName(this.state!, this.me)}’s Claude Code has the rest of the work: ${r.summary}` }))
+      }
+    }
+    all[key] = keep
+    await soft(() => this.io.storeSet(STORE_WAITING, all))
+  }
+
+  /** A transfer finished: the Claude Code it left sets its copy aside (move, not copy). */
+  private transferUpdated(transferId: string, status: string): void {
+    const tr = this.state?.transfers?.[transferId]
+    // A copy of some files for someone's browser moved nothing: there's nothing to set aside.
+    if (!tr || tr.from !== this.me || tr.copy) return
+    if (status === 'done') void this.releaseMoved(tr.id, tr.branchId, tr.to)
+    else if (status === 'failed') void soft(() => this.io.run(['git', 'update-ref', '-d', `refs/multiplayer/out/${tr.id}`], { timeoutMs: 20_000 }))
+  }
+
+  private async releaseMoved(transferId: string, branchId: string, to: MemberId): Promise<void> {
+    const s = this.state
+    if (!s) return
+    const name = memberName(s, to)
+    // The turns are marked moved by now: their paths still say what went.
+    const paths = await this.workPaths(branchId, true)
+    const out = await this.inFolder(() => soft(() => M.releaseWork(this.io, { folder: this.cwd, paths, to: name, transferId })))
+    // What came here before went on with it.
+    await this.setArrived(branchId, null)
+    const conv = this.convTitle(branchId)
+    const kept = out?.kept ?? []
+    this.io.toast(`Multiplayer: “${conv}” moved to ${name}’s Claude Code. Your copy of its changes is set aside in git stash${kept.length ? `, except ${clip(kept.join(', '), 100)}, which changed since it was sent and stays as it is` : ''}.`)
+  }
+
+  /**
+   * The conversation moved here from a Claude Code that was offline: only what it pushed can come.
+   * Pulled when this folder is clean and on its branch; never pushed, never discarded.
+   */
+  private async arrived(branchId: string): Promise<void> {
+    const s = this.state
+    const w = this.wire
+    if (!s || !w) return
+    const pushed = Object.values(s.turns).filter((t) => t.branchId === branchId && t.work?.pushed).sort((x, y) => (y.work!.at ?? 0) - (x.work!.at ?? 0))[0]?.work?.pushed
+    if (!pushed) return
+    const r = await this.inFolder(() => soft(() => M.pullMoved(this.io, { folder: this.cwd, branch: pushed })))
+    if (!r) return
+    const me = memberName(s, this.me)
+    if ('pulled' in r) {
+      if (r.pulled > 0) await soft(() => w.command({ type: 'runner.arrived', branchId, pulled: r.pulled }))
+    } else {
+      this.io.toast(`Multiplayer: “${this.convTitle(branchId)}” runs here now, but its pushed work wasn’t pulled: ${r.note}.`)
+      await soft(() => w.command({ type: 'runner.arrived', branchId, pulled: 0, note: clip(`${me}’s Claude Code didn’t pull the pushed work: ${r.note}`, 200) }))
+    }
+  }
+
+  /** Branches that moved away while this Claude Code was offline and still have changes only here. */
+  private lateBranches: string[] = []
+  /** Moves being applied or set aside in this folder right now (turns wait: pump). */
+  private moveBusy = 0
+  /** A branch whose arriving work this folder refused: /multiplayer get-work asks for it again. */
+  private retryBranch: string | null = null
+
+  private async sentFrom(): Promise<Record<string, Record<string, string>>> {
+    const all = ((await soft(() => this.io.storeGet(STORE_SENT))) ?? {}) as Record<string, Record<string, Record<string, string>>>
+    return all[this.folderKey()] ?? {}
+  }
+
+  private async setSent(branchId: string, sent: Record<string, string>): Promise<void> {
+    const all = ((await soft(() => this.io.storeGet(STORE_SENT))) ?? {}) as Record<string, Record<string, Record<string, string>>>
+    all[this.folderKey()] = { ...(all[this.folderKey()] ?? {}), [branchId]: sent }
+    await soft(() => this.io.storeSet(STORE_SENT, all))
+  }
+
+  /** /multiplayer get-work: the work a move sent here didn't come in; once this folder's ready, ask for it again. */
+  private async cmdGetWork(): Promise<string> {
+    const b = this.retryBranch ?? (this.lastBranchId && this.state?.branches[this.lastBranchId]?.runnerId === this.me ? this.lastBranchId : null)
+    if (!b || !this.wire) return 'Nothing is waiting to come here.'
+    const r = await this.wire.command({ type: 'work.resend', branchId: b })
+    if (!r.ok) return `Couldn’t ask for it: ${r.error}`
+    this.retryBranch = null
+    return `Asked for “${this.convTitle(b)}”’s work again. It comes straight from the computer it’s on.`
+  }
+
+  /** On connect: work that left while this Claude Code was away, and didn't come along. */
+  private async lateSend(): Promise<void> {
+    const s = this.state
+    if (!s) return
+    const kept = new Set(((await soft(() => this.io.storeGet(STORE_KEPT))) ?? []) as string[])
+    this.lateBranches = []
+    for (const b of Object.values(s.branches)) {
+      if (!b.runnerId || b.runnerId === this.me || b.private || b.state === 'merged' || kept.has(b.id)) continue
+      if (Object.values(s.transfers ?? {}).some((x) => x.branchId === b.id && (x.status === 'packing' || x.status === 'sending'))) continue
+      const mine = Object.values(s.turns).filter((t) => t.branchId === b.id && t.runnerId === this.me && t.work?.uncommitted?.length && !t.work.movedTo)
+      if (!mine.length) continue
+      const paths = await this.workPaths(b.id)
+      const dirty = await soft(() => G.dirtyAmong(this.io, paths))
+      if (!dirty?.length) continue
+      this.lateBranches.push(b.id)
+      this.io.toast(`Multiplayer: “${this.convTitle(b.id)}” moved to ${memberName(s, b.runnerId)}’s Claude Code while you were away. Your copy of its changes (${dirty.length} file${dirty.length === 1 ? '' : 's'}) wasn’t sent. /multiplayer send-work to send them now, or /multiplayer keep-work to keep them here.`)
+    }
+  }
+
+  private async cmdSendWork(): Promise<string> {
+    const b = this.lateBranches[0]
+    if (!b || !this.wire) return 'Nothing of yours is waiting to be sent.'
+    const r = await this.wire.command({ type: 'work.send', branchId: b })
+    if (!r.ok) return `Couldn’t send it: ${r.error}`
+    this.lateBranches.shift()
+    return `Sending your copy of “${this.convTitle(b)}”’s changes to ${this.state ? memberName(this.state, this.state.branches[b].runnerId ?? '') : 'its Claude Code'}.`
+  }
+
+  private async cmdKeepWork(): Promise<string> {
+    const b = this.lateBranches.shift()
+    if (!b) return 'Nothing of yours is waiting to be sent.'
+    const kept = ((await soft(() => this.io.storeGet(STORE_KEPT))) ?? []) as string[]
+    await soft(() => this.io.storeSet(STORE_KEPT, [...kept.filter((x) => x !== b), b].slice(-50)))
+    return `Kept here: your copy of “${this.convTitle(b)}”’s changes stays in this folder, and isn’t sent.`
+  }
+
   // ================================================================ files
 
   async files(requestId: string, action: FilesAction): Promise<void> {
@@ -1521,6 +1920,7 @@ export class Runner {
       else if (action.type === 'resolve') {
         const r = await G.filesResolve(io, action.picks ?? {})
         report = r.report
+        if (report.state === 'resolved') void this.applyWaiting()
         if (r.forClaude.length) this.queueCombine(requestId, r.forClaude)
       } else {
         const hunks = await G.conflictHunks(io)
@@ -1556,6 +1956,7 @@ export class Runner {
     this.combine = null
     if (!c) return
     const r = await soft(() => G.finishResolve(this.io))
+    if (r?.report.state === 'resolved') void this.applyWaiting()
     await (c.wire ?? this.wire)?.live({ kind: 'files.report', requestId: c.requestId, report: r?.report ?? { state: 'error', error: 'Could not check the result.' } })
   }
 
@@ -1623,8 +2024,12 @@ export class Runner {
           if ((await this.takeOver()) === 'after') return { text: 'Your other Claude Code is in the middle of a turn of yours. It finishes there, then your turns run here.' }
           return { text: 'Resumed: picking up your turns here.' }
         }
-        case 'allow': case 'approve': return { text: await this.answerLocally(rest[0] === 'always' ? 'allow-always' : 'allow-once') }
-        case 'deny': return { text: await this.answerLocally('deny') }
+        // A tool's approval comes first; then someone asking to run their turn here, or to move a conversation.
+        case 'allow': case 'approve': return { text: (!this.approvalWaiting() && (await this.answerAsk(true, rest[0] === 'always'))) || (await this.answerLocally(rest[0] === 'always' ? 'allow-always' : 'allow-once')) }
+        case 'deny': return { text: (!this.approvalWaiting() && (await this.answerAsk(false, false))) || (await this.answerLocally('deny')) }
+        case 'send-work': return { text: await this.cmdSendWork() }
+        case 'keep-work': return { text: await this.cmdKeepWork() }
+        case 'get-work': return { text: await this.cmdGetWork() }
         case 'stop': {
           const a = this.active
           if (!a || !this.wire) return { text: 'No shared turn is running here.' }
@@ -1724,6 +2129,7 @@ export class Runner {
       '  /multiplayer import [session id]                     bring this Claude Code conversation (or another here) into a space',
       '  /multiplayer sharing | unshare <name|all>             what of yours this space may read (your Gmail, files outside the project)',
       '  /multiplayer status | open | pause | resume | allow | deny | stop | share <what> | post [text] | take-home | leave',
+      '  /multiplayer send-work | keep-work | get-work          a moved conversation’s changes: send yours on, keep them, or ask for them again',
       `Server: ${normalizeServer(this.opts.server)} (change it in /config, Multiplayer › Server URL)${this.account ? ` · signed in${this.account.email ? ` as ${this.account.email}` : ''}` : ''}.`,
       ...(web ? [`Help, setup and updates: ${web.replace(/\/+$/, '')}/help`] : []),
     ].join('\n')
@@ -2262,6 +2668,8 @@ export class Runner {
     if (this.phase === 'signed-out') return 'signed out'
     if (this.phase === 'superseded') return 'another Claude Code is running your turns'
     if (a && waiting) return `waiting for your approval (${a.label})`
+    const ask = this.asksToMe()[0]
+    if (ask && this.state) return `waiting for your OK (${memberName(this.state, ask.from)})`
     if (a && !a.stopped) return `running ${a.label}`
     if (this.combine) return 'combining file changes'
     const next = this.queue[0]
@@ -2283,6 +2691,7 @@ export class Runner {
     const a = this.active
     if (this.phase === 'signed-out' || this.phase === 'superseded') return true
     if (a && a.approvals.size > 0) return true
+    if (this.asksToMe().length) return true
     if (a && !a.stopped) return false
     if (this.combine) return false
     if (this.queue[0]) return this.busy
@@ -2320,6 +2729,7 @@ export class Runner {
       people,
       turns,
       approval: pending ? { tool: pending.tool, title: pending.title } : null,
+      asks: s ? this.asksToMe().slice(0, 5).map((x) => ({ from: memberName(s, x.from), kind: x.kind === 'move' ? 'move' as const : 'run-here' as const, space: this.convTitle(x.branchId) })) : [],
     }
   }
 

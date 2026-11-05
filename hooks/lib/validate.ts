@@ -1,7 +1,7 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
 import type { Command } from './commands.ts';
 import { isModelName, isSite } from './helpers.ts';
-import { WORK_COMMITS_MAX, WORK_FILES_MAX } from './types.ts';
+import { TRANSFER_MAX_BYTES, WORK_COMMITS_MAX, WORK_FILES_MAX } from './types.ts';
 
 /**
  * Shape checks for commands arriving from the network, before `decide` reads
@@ -33,14 +33,14 @@ const SPECS: Record<Command['type'], Spec> = {
   'space.end': {},
   'conversation.create': { title: 'str:120?', carry: 'bool', filesFromMain: 'bool', model: 'str:100?' },
   'conversation.rename': { conversationId: 'id', title: 'str:120' },
-  'branch.fork': { fromBranchId: 'id', atTurnId: 'id?', private: 'bool?', name: 'str:80?', editOf: 'id?', editText: `${TEXT}?`, editParts: 'any?' },
+  'branch.fork': { fromBranchId: 'id', atTurnId: 'id?', private: 'bool?', name: 'str:80?', editOf: 'id?', editText: `${TEXT}?`, editParts: 'any?', inMine: 'bool?' },
   'branch.state': { branchId: 'id', state: 'enum:parked|active' },
   'branch.rename': { branchId: 'id', name: 'str:80' },
   'branch.model': { branchId: 'id', name: 'str:100', effort: 'enum:low|medium|high' },
   'branch.import': { branchId: 'id', source: 'obj', turns: 'any', model: 'str:100?' },
   'part.add': { branchId: 'id', text: TEXT, position: 'bool?', id: 'id?', cites: 'id?', files: 'any?' },
   'part.remove': { partId: 'id' },
-  'turn.send': { branchId: 'id', mode: 'enum:normal|view-first?', handoffId: 'id?', plan: 'bool?' },
+  'turn.send': { branchId: 'id', mode: 'enum:normal|view-first?', handoffId: 'id?', plan: 'bool?', runIn: 'id?' },
   'turn.resolve': { turnId: 'id', pick: 'str:80' },
   'turn.stop': { turnId: 'id' },
   'turn.takeover': { turnId: 'id' },
@@ -48,7 +48,11 @@ const SPECS: Record<Command['type'], Spec> = {
   'turn.reveal': { turnId: 'id' },
   'handoff.offer': { branchId: 'id', to: 'id' },
   'handoff.cancel': { handoffId: 'id' },
-  'ask.answer': { askId: 'id', allow: 'bool' },
+  'ask.answer': { askId: 'id', allow: 'bool', always: 'bool?' },
+  'work.resend': { branchId: 'id' },
+  'files.get': { turnId: 'id' },
+  'files.got': { transferId: 'id', ok: 'bool' },
+  'run.allow': { conversationId: 'id', memberId: 'id', on: 'bool' },
   'decision.propose': { branchId: 'id', text: 'str:2000', replaces: 'id?' },
   'decision.approve': { decisionId: 'id' },
   'decision.dissent': { decisionId: 'id', text: 'str:2000' },
@@ -73,7 +77,13 @@ const SPECS: Record<Command['type'], Spec> = {
   'runner.decision': { turnId: 'id', text: 'str:2000', replaces: 'id?' },
   'runner.question': { turnId: 'id', text: 'str:2000' },
   'runner.pushed': { push: 'obj' },
-  'runner.work': { turnId: 'id', work: 'obj' },
+  'runner.work': { turnId: 'id', work: 'obj', repo: 'str:16?' },
+  'runner.transfer': { transferId: 'id', status: 'enum:ready|done|failed', summary: 'str:200?', manifest: 'obj?' },
+  'runner.arrived': { branchId: 'id', pulled: 'num', note: 'str:200?' },
+  'work.move': { branchId: 'id' },
+  'work.offer': { branchId: 'id', to: 'id' },
+  'work.send': { branchId: 'id' },
+  'server.transfer-timeout': { transferId: 'id' },
   'server.pause': { turnId: 'id' },
   'server.resume': { turnId: 'id' },
   'server.note': { turnId: 'id', text: 'str:200000' },
@@ -153,6 +163,15 @@ export function invalid(cmd: unknown): string | null {
       || !w.commits.every((x) => isObj(x) && typeof x.sha === 'string' && /^[0-9a-f]{7,64}$/.test(x.sha) && typeof x.subject === 'string' && x.subject.length <= 300 && !CONTROL.test(x.subject)))) return 'Bad work.';
     // A git branch name's characters only.
     if (w.pushed !== undefined && (typeof w.pushed !== 'string' || !/^[A-Za-z0-9._/-]{1,200}$/.test(w.pushed))) return 'Bad work.';
+  }
+  if (cmd.type === 'runner.work' && c.repo !== undefined && !/^[0-9a-f]{16}$/.test(c.repo as string)) return 'Bad work.';
+  // What a move says reaches everyone's screen: one plain line, and a manifest of exact numbers.
+  if ((cmd.type === 'runner.transfer' || cmd.type === 'runner.arrived') && [c.summary, c.note].some((v) => typeof v === 'string' && CONTROL.test(v))) return 'Bad summary.';
+  if (cmd.type === 'runner.arrived' && (!Number.isInteger(c.pulled) || (c.pulled as number) < 0 || (c.pulled as number) > 100_000)) return 'Bad count.';
+  if (cmd.type === 'runner.transfer' && c.manifest !== undefined) {
+    const m = c.manifest as Record<string, unknown>;
+    const n = (v: unknown, max: number) => typeof v === 'number' && Number.isInteger(v) && v > 0 && v <= max;
+    if (Object.keys(m).some((k) => !['size', 'sha256', 'chunks'].includes(k)) || !n(m.size, TRANSFER_MAX_BYTES) || !n(m.chunks, 64) || typeof m.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(m.sha256)) return 'Bad manifest.';
   }
   if (cmd.type === 'merge.complete' && !Object.values(c.picks as object).every((v) => typeof v === 'boolean')) return 'Bad picks.';
   // A pinned model goes to Claude Code's --model on the runner's machine.

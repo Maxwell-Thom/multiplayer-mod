@@ -2,7 +2,7 @@
 import type {
   Ask, Branch, ChatMessage, Conversation, Decision, FilesPush, Handoff, Member, MemberId, Merge,
   MergeChoice, ModelPin, Note, Part, Policy, Presence, Question, RunnerInfo, Space, Step, TimelineItem,
-  Schedule, SharedFile, Turn, TurnFailure, TurnMode, TurnWork, Usage, Id,
+  Schedule, SharedFile, Transfer, Turn, TurnFailure, TurnMode, TurnWork, Usage, Id,
 } from './types.ts';
 import type { AskQuestion } from './helpers.ts';
 
@@ -23,6 +23,13 @@ export type EventBody =
   | { type: 'conversation.created'; conversation: Conversation; main: Branch }
   | { type: 'conversation.renamed'; conversationId: Id; title: string }
   | { type: 'branch.created'; branch: Branch }
+  /** Whose Claude Code a branch runs in now, and why it changed. */
+  | { type: 'branch.runner'; branchId: Id; runnerId: MemberId | null; from: MemberId | null; why: 'first' | 'moved' | 'takeover' | 'left' }
+  | { type: 'run.allowed'; conversationId: Id; runnerId: MemberId; memberId: MemberId; on: boolean }
+  | { type: 'branch.repo'; branchId: Id; repo: string }
+  | { type: 'ask.closed'; askId: Id }
+  | { type: 'transfer.started'; transfer: Transfer }
+  | { type: 'transfer.updated'; transferId: Id; status: Transfer['status']; manifest?: Transfer['manifest']; summary?: string }
   | { type: 'branch.updated'; branchId: Id; patch: Partial<Pick<Branch, 'name' | 'state'>> }
   | { type: 'branch.model'; branchId: Id; model: ModelPin }
   | { type: 'part.added'; part: Part }
@@ -88,6 +95,8 @@ export type LiveMessage =
   | { kind: 'local.request'; requestId: string; action: LocalAction }
   | { kind: 'local.report'; requestId?: string; report: LocalReport }
   | { kind: 'focus'; conversationId: Id; branchId: Id }
+  /** How much of a move's work has reached the Claude Code it's going to (counted by the relay): for both ends and the branch's readers. */
+  | { kind: 'transfer.progress'; transferId: Id; sent: number; size: number }
   | { kind: 'toast'; title: string; text?: string };
 
 export type FilesAction =

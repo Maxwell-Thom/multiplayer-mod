@@ -1,5 +1,5 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import { branchDecisions, branchQuestions, clip, historyTurns, isOneOff, memberName, mainOf, isMain, noteLine, turnsOf, workFiles, workStatus } from './helpers.ts';
+import { branchDecisions, branchQuestions, clip, historyTurns, isOneOff, memberName, mainOf, isMain, noteLine, turnsOf, workFiles, workStatus, workWhere } from './helpers.ts';
 import type { Decision, Id, MemberId, SpaceState, Turn } from './types.ts';
 
 /**
@@ -49,9 +49,11 @@ function workNote(s: SpaceState, t: Turn, r: Reader | undefined): string {
 function standing(s: SpaceState, t: Turn, r: Reader): { text: string; missing: boolean } {
   const w = t.work!;
   const f = r.folder;
-  const here = !!f?.here.includes(t.id);
-  const who = memberName(s, t.runnerId);
-  const away = t.runnerId === r.runnerId ? `only in another of ${who}'s folders` : `only on ${who}'s computer`;
+  // A move brought it into this runner's folder: it's here now, wherever it was made.
+  const where = workWhere(t);
+  const here = !!f?.here.includes(t.id) || (!!f && !!w.movedTo && w.movedTo === r.runnerId);
+  const who = memberName(s, where);
+  const away = where === r.runnerId ? `only in another of ${who}'s folders` : `only on ${who}'s computer`;
   const newest = w.commits?.[0];
   const commits = newest ? `${w.commits!.length === 1 ? 'commit' : `${w.commits!.length} commits, newest`} ${sha12(newest.sha)} “${clip(newest.subject, 80)}”` : '';
   const pushedHas = () => !f ? '' : here || f.has.includes(sha12(newest!.sha)) ? '; this folder has it'
@@ -299,6 +301,12 @@ export function buildTurnContext(s: SpaceState, turn: Turn, opts: ContextOptions
     prompt = `(${names.slice(0, -1).join(', ')} and ${names[names.length - 1]} each wrote part of this turn. When you take up a request, say whose it is.)\n\n${prompt}`;
   }
   if (turn.handedFrom) prompt += `\n\n(${memberName(s, turn.handedFrom)} wrote this and handed it to ${memberName(s, turn.senderId)} to send.)`;
+  // Each conversation runs in one Claude Code: someone else's prompt runs here, as if typed here.
+  // Never on a reveal: its positions are shown without names, and so is who asked to show them.
+  if (turn.senderId !== turn.runnerId && !isOneOff(turn) && turn.mode !== 'merge-note' && turn.mode !== 'reveal') {
+    const runner = memberName(s, turn.runnerId);
+    prompt += `\n\n(${memberName(s, turn.senderId)} sent this turn. It runs here, in ${runner}'s Claude Code, on ${runner}'s plan.)`;
+  }
   if (turn.takenFrom) context.push(`${memberName(s, turn.takenFrom)}'s Claude went quiet while running this turn, so ${runner} took it over. Start it fresh.`);
 
   return { prompt, context };

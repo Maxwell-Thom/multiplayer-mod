@@ -2,7 +2,7 @@
 import type { Command, CommandContext } from './commands.ts';
 import type { EventBody } from './events.ts';
 import {
-  activeTurn, branchDecisions, canSee, clip, historyTurns, isActive, isMain, isOneOff, latestTurnId, mainOf,
+  activeTurn, branchDecisions, canSee, clip, countText, historyTurns, isActive, isMain, isOneOff, latestTurnId, leftBehind, mainOf, mayRunFor, openAsks,
   memberName, nextDecisionId, nextQuestionId, hhmm, modelLabel, turnsOf,
 } from './helpers.ts';
 import type { Branch, Decision, MergeItem, Part, Policy, Schedule, SharedFile, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
@@ -22,6 +22,107 @@ function ev(ctx: CommandContext, branchId: Id, icon: string, text: string, link?
   return { type: 'timeline.event', branchId, item: { kind: 'event', id: ctx.id('ev'), icon, actor: ctx.actor, text, at: ctx.now, link } };
 }
 
+const routed = (x: { runnerId: MemberId; events: EventBody[] } | Decided): x is { runnerId: MemberId; events: EventBody[] } => 'runnerId' in x;
+
+/**
+ * Who must say yes before a turn runs: the branch's owner (policy.ownerOk), and the Claude Code
+ * it runs in when that isn't the sender's and they haven't allowed the sender here. An owner who
+ * is also the runner is asked once.
+ */
+function oksFor(s: SpaceState, b: Branch, senderId: MemberId, runnerId: MemberId): ('send-in-branch' | 'run-here')[] {
+  const runHere = runnerId !== senderId && !b.private && !mayRunFor(s, b.conversationId, runnerId, senderId);
+  const owner = !!b.ownerId && b.ownerId !== senderId && !b.private && s.space.policy.ownerOk && !s.members[b.ownerId]?.leftAt && !(runHere && b.ownerId === runnerId);
+  return [...(owner ? ['send-in-branch' as const] : []), ...(runHere ? ['run-here' as const] : [])];
+}
+
+function askEvents(ctx: CommandContext, b: Branch, turn: Turn, kinds: ('send-in-branch' | 'run-here')[]): EventBody[] {
+  return kinds.map((kind) => ({ type: 'ask.created' as const, ask: { id: ctx.id('a'), kind, from: turn.senderId, to: kind === 'run-here' ? turn.runnerId : b.ownerId!, branchId: b.id, turnId: turn.id, status: 'open' as const, at: ctx.now } }));
+}
+
+/** A branch's work under way between two Claude Codes, if any. */
+function moving(s: SpaceState, branchId: Id) {
+  // (A copy of a turn's files doesn't hold the conversation up.)
+  return Object.values(s.transfers ?? {}).find((x) => x.branchId === branchId && !x.copy && (x.status === 'packing' || x.status === 'sending'));
+}
+
+/** Teleport's rule: the work moves only into a copy of the same project (when the server knows). */
+function wrongProject(s: SpaceState, ctx: CommandContext, b: Branch, who: MemberId): string | null {
+  if (!b.repo || !ctx.repos || ctx.repos[who] === b.repo) return null;
+  return who === ctx.actor
+    ? 'Your Claude Code is in a folder that isn’t a copy of this project. Open Claude Code in your copy of it and try again.'
+    : `${memberName(s, who)}’s Claude Code is in a folder that isn’t a copy of this project.`;
+}
+
+/** A move needs the Claude Code it goes to to be connected (when the server says who is). */
+function offline(s: SpaceState, ctx: CommandContext, who: MemberId): string | null {
+  if (!ctx.online || ctx.online.includes(who)) return null;
+  return who === ctx.actor ? 'Connect your Claude Code first, then move it here.' : `${memberName(s, who)}’s Claude Code isn’t connected right now.`;
+}
+
+/**
+ * The branch runs in `to`'s Claude Code from now on, said where everyone reads it. `send`: the
+ * Claude Code it leaves is online, so it sends what's only on its computer (a transfer);
+ * otherwise the line says what stayed there. `answered`: the ask this move answers, if any.
+ */
+function moveEvents(s: SpaceState, ctx: CommandContext, b: Branch, to: MemberId, why: 'moved' | 'takeover', send: boolean, answered?: Id): EventBody[] {
+  const from = b.runnerId ?? null;
+  const actor = ctx.actor as MemberId;
+  const where = s.conversations[b.conversationId]?.mainBranchId === b.id ? 'conversation' : 'branch';
+  const left = from ? leftBehind(s, b.id, from) : { files: 0, commits: 0 };
+  const sending = send && !!from && from !== to && left.files + left.commits > 0;
+  const out: EventBody[] = [{ type: 'branch.runner', branchId: b.id, runnerId: to, from, why }];
+  // Other asks to move it are moot now.
+  for (const a of Object.values(s.asks)) if (a.kind === 'move' && a.branchId === b.id && a.status === 'open' && a.id !== answered) out.push({ type: 'ask.closed', askId: a.id });
+  if (sending) out.push({ type: 'transfer.started', transfer: { id: ctx.id('tr'), branchId: b.id, from: from!, to, status: 'packing', at: ctx.now } });
+  const head = why === 'takeover'
+    ? `${memberName(s, actor)} took over · this ${where} runs in ${memberName(s, to)}’s Claude Code now`
+    : `${memberName(s, actor)} moved this ${where} to ${actor === to ? 'their' : `${memberName(s, to)}’s`} Claude Code`;
+  const stayed = countText(left.files, left.commits);
+  const tail = sending ? ` · the work is on its way from ${memberName(s, from!)}’s computer` : stayed && from ? ` · ${stayed} stayed on ${memberName(s, from)}’s computer` : '';
+  if (!b.private) out.push(ev(ctx, b.id, 'laptop', head + tail, { kind: 'work', label: 'Where the code is' }));
+  return out;
+}
+
+/**
+ * Someone leaves, or can only read now: the branches they run run in nobody's Claude Code until
+ * the next send; what waits on them closes; turns waiting to run there go back to the box.
+ */
+function leaveEvents(s: SpaceState, ctx: CommandContext, m: MemberId, why: 'left' | 'viewer'): EventBody[] {
+  const out: EventBody[] = [];
+  const name = memberName(s, m);
+  // Work on its way to or from them goes nowhere now: the move ends, so nothing waits for it.
+  for (const tr of Object.values(s.transfers ?? {})) {
+    if ((tr.status === 'packing' || tr.status === 'sending') && (tr.from === m || tr.to === m)) out.push({ type: 'transfer.updated', transferId: tr.id, status: 'failed', summary: `${name} ${why === 'left' ? 'left' : 'can only read now'}` });
+  }
+  for (const b of Object.values(s.branches)) {
+    if (b.runnerId !== m || b.state === 'merged') continue;
+    out.push({ type: 'branch.runner', branchId: b.id, runnerId: null, from: m, why: 'left' });
+    const left = leftBehind(s, b.id, m);
+    const stayed = countText(left.files, left.commits);
+    if (!b.private) out.push(ev(ctx, b.id, 'laptop', `${name} ${why === 'left' ? 'left' : 'can only read now'} · the next turn picks a Claude Code${stayed ? ` · ${stayed} stayed on ${name}’s computer` : ''}`));
+  }
+  const gone = new Set<Id>();
+  const cancel = (t: Turn) => { if (gone.has(t.id)) return; gone.add(t.id); out.push({ type: 'turn.cancelled', turnId: t.id, by: m, restore: isOneOff(t) || t.mode === 'merge-note' ? [] : restoreOf(ctx, t) }); };
+  for (const a of Object.values(s.asks)) {
+    if (a.status !== 'open' || (a.to !== m && a.from !== m)) continue;
+    const t = a.turnId ? s.turns[a.turnId] : undefined;
+    if (t && t.status === 'held' && (a.kind === 'run-here' || a.from === m)) cancel(t);
+    else {
+      out.push({ type: 'ask.closed', askId: a.id });
+      // A branch owner who left no longer needs to OK it: it runs if nothing else waits.
+      if (t && t.status === 'held' && !openAsks(s, t.id).some((x) => x.id !== a.id && x.to !== m && x.from !== m)) out.push({ type: 'turn.released', turnId: t.id });
+    }
+  }
+  // Turns that were going to run in their Claude Code can't now.
+  for (const t of Object.values(s.turns)) if (t.runnerId === m && (t.status === 'requested' || t.status === 'held')) cancel(t);
+  return out;
+}
+
+/** A prompt going back to its writers' box: their parts as they were, files included. */
+function restoreOf(ctx: CommandContext, t: Turn): Part[] {
+  return t.parts.map((p, i) => ({ id: ctx.id('p'), branchId: t.branchId, memberId: p.memberId, text: p.text, at: ctx.now + i, position: p.position, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}), ...(p.files?.length ? { files: p.files } : {}) }));
+}
+
 /** Text as one sentence: a full stop added only if it has no closing punctuation. */
 function sentence(text: string): string {
   const t = text.trim();
@@ -31,6 +132,38 @@ function sentence(text: string): string {
 function latestMain(s: SpaceState): Branch | undefined {
   const c = s.conversationOrder[0];
   return c ? mainOf(s, c) : undefined;
+}
+
+/**
+ * Whose Claude Code a new turn on this branch runs in: the branch's, whoever sends it. A branch
+ * nobody's Claude Code runs yet starts in `runIn` (the sender's choice), else the sender's, and
+ * says so once. `online`: refuse to start it in a Claude Code the server knows isn't connected.
+ */
+function routeTurn(s: SpaceState, ctx: CommandContext, branch: Branch, senderId: MemberId, o: { runIn?: MemberId; online?: boolean } = {}): { runnerId: MemberId; events: EventBody[] } | Decided {
+  const runner = branch.runnerId ?? null;
+  if (runner) {
+    if (o.runIn && o.runIn !== runner) return fail(`This conversation already runs in ${memberName(s, runner)}’s Claude Code.`, 'state');
+    // Someone who left, or who can only read now, runs nothing here (security review).
+    const m = s.members[runner];
+    if (!m || m.leftAt || m.role === 'viewer') return fail(`${memberName(s, runner)} can’t run turns here any more. Move the work to your Claude Code.`, 'state');
+    return { runnerId: runner, events: [] };
+  }
+  const first = o.runIn ?? senderId;
+  const who = s.members[first];
+  if (!who || who.leftAt || who.role === 'viewer') return fail('That person can’t run turns here.');
+  if (o.online && ctx.online && !ctx.online.includes(first)) {
+    return fail(first === senderId
+      ? 'Connect your Claude Code to start this conversation, or let someone who has one send first.'
+      : `${memberName(s, first)}’s Claude Code isn’t connected.`, 'offline');
+  }
+  const main = s.conversations[branch.conversationId]?.mainBranchId === branch.id;
+  return {
+    runnerId: first,
+    events: [
+      { type: 'branch.runner', branchId: branch.id, runnerId: first, from: null, why: 'first' },
+      ev(ctx, branch.id, 'laptop', `This ${main ? 'conversation' : 'branch'} runs in ${memberName(s, first)}’s Claude Code`),
+    ],
+  };
 }
 
 function turnFrom(ctx: CommandContext, s: SpaceState, branch: Branch, parts: Turn['parts'], patch: Partial<Turn> = {}): Turn {
@@ -110,7 +243,9 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!m || m.leftAt) return fail('No such member.');
       if (cmd.role === 'host') return ok({ type: 'space.host', hostId: m.id });
       if (m.id === s.space.hostId) return fail('Hand hosting to someone else first.');
-      return ok({ type: 'member.updated', memberId: m.id, patch: { role: cmd.role } });
+      // Someone who can only read runs nothing here: their branches stop running in their Claude Code.
+      const readOnly = cmd.role === 'viewer' && m.role !== 'viewer' ? leaveEvents(s, ctx, m.id, 'viewer') : [];
+      return ok({ type: 'member.updated', memberId: m.id, patch: { role: cmd.role } }, ...readOnly);
     }
     case 'member.leave': {
       const out: EventBody[] = [];
@@ -128,15 +263,15 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         if (!to) {
           out.push({ type: 'space.ended' });
           if (main) out.push(ev(ctx, main.id, 'power', `${name} left, and the space ended`));
-          out.push({ type: 'member.left', memberId: actor as MemberId });
+          out.push(...leaveEvents(s, ctx, actor as MemberId, 'left'), { type: 'member.left', memberId: actor as MemberId });
           return ok(...out);
         }
         out.push({ type: 'space.host', hostId: to });
-        out.push({ type: 'member.left', memberId: actor as MemberId });
+        out.push(...leaveEvents(s, ctx, actor as MemberId, 'left'), { type: 'member.left', memberId: actor as MemberId });
         if (main) out.push(ev(ctx, main.id, 'crown', `${name} left · ${memberName(s, to)} is the host now`));
         return ok(...out);
       }
-      out.push({ type: 'member.left', memberId: actor as MemberId });
+      out.push(...leaveEvents(s, ctx, actor as MemberId, 'left'), { type: 'member.left', memberId: actor as MemberId });
       if (main) out.push(ev(ctx, main.id, 'logout', `${name} left the space`));
       return ok(...out);
     }
@@ -146,7 +281,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!m || m.leftAt) return fail('No such member.');
       if (m.id === actor) return fail('Use Leave to leave the space yourself.');
       const main = latestMain(s);
-      const out: EventBody[] = [{ type: 'member.left', memberId: m.id }];
+      const out: EventBody[] = [...leaveEvents(s, ctx, m.id, 'left'), { type: 'member.left', memberId: m.id }];
       if (main) out.push(ev(ctx, main.id, 'logout', `${memberName(s, actor)} removed ${m.name} from the space`));
       return ok(...out);
     }
@@ -208,6 +343,9 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         id, conversationId: parent.conversationId, name, ownerId: actor as MemberId, parentId: parent.id,
         forkTurnId: forkTurnId ?? null, editOf: cmd.editOf, private: !!cmd.private || parent.private, state: 'active',
         model: { ...parent.model }, createdAt: ctx.now,
+        // It runs where its parent runs, as Claude Code forks a session where it is; a private
+        // lane, or one branched off "in my Claude Code", runs in its owner's.
+        runnerId: cmd.private || parent.private || cmd.inMine ? actor as MemberId : parent.runnerId ?? null,
       };
       const out: EventBody[] = [{ type: 'branch.created', branch }];
       const at = cmd.atTurnId && s.turns[cmd.atTurnId] ? hhmm(s.turns[cmd.atTurnId].requestedAt) : null;
@@ -215,6 +353,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         out.push(ev(ctx, parent.id, 'branch', `${memberName(s, actor)} branched “${name}”${at ? ` from ${at}` : ''}`, { kind: 'branch', id, label: 'Open' }));
       }
       out.push(ev(ctx, id, branch.private ? 'lock' : 'branch', branch.private ? 'Your private lane, from the latest turn' : `Branched from ${parent.name}${at ? ` at ${at}` : ''}${cmd.editOf ? ', with an edit' : ''}`));
+      if (cmd.inMine && !branch.private) out.push(ev(ctx, id, 'laptop', `This branch runs in ${memberName(s, actor)}’s Claude Code`));
       const original = cmd.editOf ? s.turns[cmd.editOf] : undefined;
       if (cmd.editParts && original) {
         // A reveal's positions are shown without names: an edit must not put them back.
@@ -232,10 +371,15 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         if (!parts.length) return fail('Nothing to send.');
         // Positions held back stay exactly as they were, and held back: the editor never saw them.
         const held = original.parts.filter((p) => p.position).map((p) => ({ ...p }));
-        out.push({ type: 'turn.requested', turn: turnFrom(ctx, s, branch, [...parts, ...held], held.length ? { mode: 'view-first' } : {}), consumed: [] });
+        const route = routeTurn(s, ctx, branch, actor as MemberId, { online: true }); if (!routed(route)) return route;
+        const oks = oksFor(s, branch, actor as MemberId, route.runnerId);
+        const t = turnFrom(ctx, s, branch, [...parts, ...held], { ...(held.length ? { mode: 'view-first' } : {}), runnerId: route.runnerId, status: oks.length ? 'held' : 'requested' });
+        out.push(...route.events, { type: 'turn.requested', turn: t, consumed: [] }, ...askEvents(ctx, branch, t, oks));
       } else if (cmd.editText && cmd.editText.trim()) {
-        const t = turnFrom(ctx, s, branch, [{ memberId: actor as MemberId, text: cmd.editText.trim() }]);
-        out.push({ type: 'turn.requested', turn: t, consumed: [] });
+        const route = routeTurn(s, ctx, branch, actor as MemberId, { online: true }); if (!routed(route)) return route;
+        const oks = oksFor(s, branch, actor as MemberId, route.runnerId);
+        const t = turnFrom(ctx, s, branch, [{ memberId: actor as MemberId, text: cmd.editText.trim() }], { runnerId: route.runnerId, status: oks.length ? 'held' : 'requested' });
+        out.push(...route.events, { type: 'turn.requested', turn: t, consumed: [] }, ...askEvents(ctx, branch, t, oks));
       }
       return ok(...out);
     }
@@ -279,6 +423,8 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         events.push(ev(ctx, b.id, 'download', `${memberName(s, actor)} brought in a conversation from ${source.from === 'claude-code' ? 'Claude Code' : 'claude.ai'}${source.title ? `: “${clip(source.title, 80)}”` : ''}`));
         // It carries on on the model it was had on.
         if (cmd.model) events.push({ type: 'branch.model', branchId: b.id, model: { name: cmd.model, effort: b.model.effort, setBy: actor as MemberId, at: ctx.now } });
+        // And in the Claude Code it was had in: the session is on the importer's computer.
+        if (b.runnerId !== actor) events.push({ type: 'branch.runner', branchId: b.id, runnerId: actor as MemberId, from: b.runnerId ?? null, why: 'first' });
       }
       // Times as they were there, kept in order and never in the future.
       let last = there.length ? there[there.length - 1].requestedAt : 0;
@@ -353,7 +499,6 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (b.state === 'parked') {
         out.push({ type: 'branch.updated', branchId: b.id, patch: { state: 'active' } });
       }
-      const needsOk = !!b.ownerId && b.ownerId !== actor && !b.private && s.space.policy.ownerOk && !s.members[b.ownerId]?.leftAt;
       let handedFrom: MemberId | undefined;
       if (cmd.handoffId) {
         const h = s.handoffs[cmd.handoffId];
@@ -361,13 +506,12 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         handedFrom = h.from;
         out.push({ type: 'handoff.updated', handoffId: h.id, status: 'taken' });
       }
+      const route = routeTurn(s, ctx, b, actor as MemberId, { runIn: cmd.runIn, online: true }); if (!routed(route)) return route;
+      const oks = oksFor(s, b, actor as MemberId, route.runnerId);
       const turn = turnFrom(ctx, s, b, parts.map((p) => ({ memberId: p.memberId, text: p.text, position: p.position || undefined, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}), ...(p.files?.length ? { files: p.files } : {}) })), {
-        mode, status: needsOk ? 'held' : 'requested', handedFrom, ...(cmd.plan ? { plan: true } : {}),
+        mode, status: oks.length ? 'held' : 'requested', handedFrom, ...(cmd.plan ? { plan: true } : {}), runnerId: route.runnerId,
       });
-      out.push({ type: 'turn.requested', turn, consumed: parts.map((p) => p.id) });
-      if (needsOk) {
-        out.push({ type: 'ask.created', ask: { id: ctx.id('a'), kind: 'send-in-branch', from: actor as MemberId, to: b.ownerId!, branchId: b.id, turnId: turn.id, status: 'open', at: ctx.now } });
-      }
+      out.push(...route.events, { type: 'turn.requested', turn, consumed: parts.map((p) => p.id) }, ...askEvents(ctx, b, turn, oks));
       return ok(...out);
     }
     case 'turn.resolve': {
@@ -375,7 +519,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const t = s.turns[cmd.turnId];
       if (!seesTurn(t) || t.status !== 'conflict' || !t.conflict) return fail('Nothing to settle there.');
       if (cmd.pick === 'cancel') {
-        const restore: Part[] = t.parts.map((p, i) => ({ id: ctx.id('p'), branchId: t.branchId, memberId: p.memberId, text: p.text, at: ctx.now + i, position: p.position, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) }));
+        const restore: Part[] = restoreOf(ctx, t);
         return ok({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore });
       }
       if (cmd.pick === 'both') {
@@ -395,7 +539,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!canWrite && t.runnerId !== actor) return fail('Viewers can’t stop turns.', 'forbidden');
       if (t.status === 'held' || t.status === 'conflict' || (t.status === 'requested' && !t.startedAt)) {
         // A recap's text is the asker's own: it never goes back into anyone's draft.
-        const restore: Part[] = isOneOff(t) || t.mode === 'merge-note' ? [] : t.parts.map((p, i) => ({ id: ctx.id('p'), branchId: t.branchId, memberId: p.memberId, text: p.text, at: ctx.now + i, position: p.position, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) }));
+        const restore: Part[] = isOneOff(t) || t.mode === 'merge-note' ? [] : restoreOf(ctx, t);
         return ok({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore });
       }
       return ok({ type: 'turn.stopped', turnId: t.id, by: actor as MemberId });
@@ -408,7 +552,11 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const waited = ctx.now - t.pausedAt;
       if (waited < s.space.policy.leaseSeconds * 1000) return fail(`Wait ${Math.ceil((s.space.policy.leaseSeconds * 1000 - waited) / 1000)} more seconds, in case ${memberName(s, t.runnerId)} comes back.`, 'lease');
       if (t.runnerId === actor) return ok({ type: 'turn.resumed', turnId: t.id });
-      return ok({ type: 'turn.takeover', turnId: t.id, runnerId: actor as MemberId });
+      // Taking over is moving the work: the branch runs in the taker's Claude Code from now on.
+      const tb = s.branches[t.branchId];
+      const moves = tb && !isOneOff(t) && tb.runnerId !== actor;
+      if (moves) { const wrong = wrongProject(s, ctx, tb, actor as MemberId); if (wrong) return fail(wrong); }
+      return ok({ type: 'turn.takeover', turnId: t.id, runnerId: actor as MemberId }, ...(moves ? moveEvents(s, ctx, tb, actor as MemberId, 'takeover', false) : []));
     }
     case 'turn.retry': {
       const deny = needWrite(); if (deny) return deny;
@@ -418,8 +566,11 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const b = branchOk(t.branchId); if (isDecided(b)) return b;
       const busy = activeTurn(s, b.id);
       if (busy) return fail('Another turn is running on this branch.', 'busy');
-      const turn = turnFrom(ctx, s, b, t.parts, { mode: t.mode === 'reveal' ? 'reveal' : t.mode, retryOf: t.id, revealOf: t.revealOf, checked: true, private: t.private });
-      return ok({ type: 'turn.requested', turn, consumed: [] });
+      // A side question or recap is its asker's own; anything else runs where its branch runs.
+      const route = isOneOff(t) ? { runnerId: actor as MemberId, events: [] } : routeTurn(s, ctx, b, actor as MemberId, { online: true }); if (!routed(route)) return route;
+      const oks = isOneOff(t) ? [] : oksFor(s, b, actor as MemberId, route.runnerId);
+      const turn = turnFrom(ctx, s, b, t.parts, { mode: t.mode === 'reveal' ? 'reveal' : t.mode, retryOf: t.id, revealOf: t.revealOf, checked: true, private: t.private, runnerId: route.runnerId, status: oks.length ? 'held' : 'requested' });
+      return ok(...route.events, { type: 'turn.requested', turn, consumed: [] }, ...askEvents(ctx, b, turn, oks));
     }
     case 'turn.reveal': {
       const deny = needWrite(); if (deny) return deny;
@@ -432,8 +583,10 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const positions = t.parts.filter((p) => p.position);
       // Shuffle so the order says nothing about who sent it.
       const shuffled = positions.map((p, i) => ({ p, k: (i * 7919 + t.id.length * 31 + ctx.now) % 101 })).sort((a, b2) => a.k - b2.k).map((x) => ({ memberId: x.p.memberId, text: x.p.text, position: true }));
-      const turn = turnFrom(ctx, s, b, shuffled, { mode: 'reveal', revealOf: t.id, checked: true });
-      return ok({ type: 'turn.requested', turn, consumed: [] });
+      const route = routeTurn(s, ctx, b, actor as MemberId, { online: true }); if (!routed(route)) return route;
+      const oks = oksFor(s, b, actor as MemberId, route.runnerId);
+      const turn = turnFrom(ctx, s, b, shuffled, { mode: 'reveal', revealOf: t.id, checked: true, runnerId: route.runnerId, status: oks.length ? 'held' : 'requested' });
+      return ok(...route.events, { type: 'turn.requested', turn, consumed: [] }, ...askEvents(ctx, b, turn, oks));
     }
     case 'handoff.offer': {
       const deny = needWrite(); if (deny) return deny;
@@ -456,17 +609,127 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
     case 'ask.answer': {
       const a = s.asks[cmd.askId];
       if (!a || a.status !== 'open') return fail('That request was already answered.');
-      if (a.to !== actor) return fail('Only the branch owner can answer that.', 'forbidden');
+      if (a.to !== actor) return fail(a.kind === 'send-in-branch' ? 'Only the branch owner can answer that.' : `Only ${memberName(s, a.to)} can answer that.`, 'forbidden');
       const out: EventBody[] = [{ type: 'ask.answered', askId: a.id, allow: cmd.allow }];
+      if (a.kind === 'move') {
+        if (!cmd.allow) return ok(...out);
+        const b = s.branches[a.branchId];
+        if (!b || b.state === 'merged') return fail('That branch is gone.');
+        const to = a.moveTo!;
+        // Asked of its runner (a request) or by it (an offer): it must still run there.
+        const runner = a.moveTo === a.from ? a.to : a.from;
+        if (b.runnerId !== runner) return fail('It runs somewhere else now.', 'state');
+        if (activeTurn(s, b.id)) return fail('Wait for the turn to finish, or stop it first.', 'busy');
+        if (moving(s, b.id)) return fail('Its work is already on its way to another Claude Code.', 'busy');
+        const off = offline(s, ctx, to); if (off) return fail(off, 'state');
+        const wrong = wrongProject(s, ctx, b, to); if (wrong) return fail(wrong);
+        // The Claude Code it leaves just asked or answered, so it's here to send the work.
+        const sends = !s.members[runner]?.leftAt && (!ctx.online || ctx.online.includes(runner));
+        return ok(...out, ...moveEvents(s, ctx, b, to, 'moved', sends, a.id));
+      }
+      // "Yes, and don't ask again for them here": their turns run in my Claude Code in this conversation.
       const t = s.turns[a.turnId];
+      if (cmd.allow && cmd.always && a.kind === 'run-here' && t) out.push({ type: 'run.allowed', conversationId: t.conversationId, runnerId: actor as MemberId, memberId: a.from, on: true });
       if (t && t.status === 'held') {
-        if (cmd.allow) out.push({ type: 'turn.released', turnId: t.id });
-        else {
-          const restore: Part[] = t.parts.map((p, i) => ({ id: ctx.id('p'), branchId: t.branchId, memberId: p.memberId, text: p.text, at: ctx.now + i, position: p.position, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) }));
-          out.push({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore });
-        }
+        // It runs once everyone it waits on said yes; one No sends it back to its writers' box.
+        if (!cmd.allow) out.push({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore: restoreOf(ctx, t) });
+        else if (!openAsks(s, t.id).some((x) => x.id !== a.id)) out.push({ type: 'turn.released', turnId: t.id });
       }
       return ok(...out);
+    }
+    case 'work.move': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      if (b.runnerId === actor) return fail('It already runs in your Claude Code.', 'state');
+      if (b.private) return fail('A private lane runs in its owner’s Claude Code.');
+      if (b.state === 'merged') return fail('That branch was merged.');
+      if (activeTurn(s, b.id)) return fail('Wait for the turn to finish, or stop it first.', 'busy');
+      if (moving(s, b.id)) return fail('Its work is already on its way to another Claude Code.', 'busy');
+      const off = offline(s, ctx, actor as MemberId); if (off) return fail(off, 'state');
+      const wrong = wrongProject(s, ctx, b, actor as MemberId); if (wrong) return fail(wrong);
+      const from = b.runnerId ?? null;
+      // Its Claude Code is gone or offline: the move is at once, and the line says what stayed there.
+      if (!from || s.members[from]?.leftAt || (ctx.online && !ctx.online.includes(from))) return ok(...moveEvents(s, ctx, b, actor as MemberId, 'moved', false));
+      if (Object.values(s.asks).some((a) => a.kind === 'move' && a.branchId === b.id && a.status === 'open')) return fail('Someone has asked to move it already.', 'state');
+      return ok({ type: 'ask.created', ask: { id: ctx.id('a'), kind: 'move', from: actor as MemberId, to: from, branchId: b.id, turnId: '', moveTo: actor as MemberId, status: 'open', at: ctx.now } });
+    }
+    case 'work.offer': {
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      if (b.private) return fail('A private lane runs in its owner’s Claude Code.');
+      if (b.runnerId !== actor) return fail('Only the Claude Code it runs in can offer it.', 'forbidden');
+      const m = s.members[cmd.to];
+      if (!m || m.leftAt || m.role === 'viewer' || cmd.to === actor) return fail('Pick someone in the space who can run turns.');
+      if (activeTurn(s, b.id)) return fail('Wait for the turn to finish, or stop it first.', 'busy');
+      if (moving(s, b.id)) return fail('Its work is already on its way to another Claude Code.', 'busy');
+      if (Object.values(s.asks).some((a) => a.kind === 'move' && a.branchId === b.id && a.status === 'open')) return fail('Someone has asked to move it already.', 'state');
+      return ok({ type: 'ask.created', ask: { id: ctx.id('a'), kind: 'move', from: actor as MemberId, to: cmd.to as MemberId, branchId: b.id, turnId: '', moveTo: cmd.to as MemberId, status: 'open', at: ctx.now } });
+    }
+    case 'files.get': {
+      // Files made outside git live only on the computer that made them: a copy comes from there,
+      // for someone who works in the conversation (not someone here to watch).
+      const deny = needWrite(); if (deny) return deny;
+      const t = s.turns[cmd.turnId];
+      if (!t || !seesTurn(t) || isOneOff(t)) return fail('No such turn.');
+      if (s.members[actor as MemberId]?.leftAt) return fail('You left this space.', 'forbidden');
+      if (!t.work?.uncommitted?.length) return fail('That turn didn’t leave any files to get.');
+      if (!t.work.noRepo) return fail('Those are in git: pull them instead.');
+      if (t.runnerId === actor) return fail('They’re on your computer already.', 'state');
+      const owner = memberName(s, t.runnerId);
+      if (s.members[t.runnerId]?.leftAt || (ctx.online && !ctx.online.includes(t.runnerId))) return fail(`${owner}’s Claude Code is offline. Ask ${owner} to come back online to get these.`, 'state');
+      if (Object.values(s.transfers ?? {}).some((x) => x.copy?.turnId === t.id && x.to === actor && (x.status === 'packing' || x.status === 'sending'))) return fail('They’re on their way already.', 'busy');
+      return ok({ type: 'transfer.started', transfer: { id: ctx.id('tr'), branchId: t.branchId, from: t.runnerId, to: actor as MemberId, status: 'packing', at: ctx.now, copy: { turnId: t.id, paths: [...t.work.uncommitted] } } });
+    }
+    case 'files.got': {
+      const tr = s.transfers?.[cmd.transferId];
+      if (!tr || !tr.copy || tr.to !== actor) return fail('No such copy on its way to you.', 'forbidden');
+      if (tr.status !== 'sending' && tr.status !== 'packing') return ok();
+      return ok({ type: 'transfer.updated', transferId: tr.id, status: cmd.ok ? 'done' : 'failed', ...(cmd.ok ? {} : { summary: 'it didn’t all arrive' }) });
+    }
+    case 'work.send': {
+      // The work moved away while this Claude Code was offline: it sends what it kept, late.
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      const to = b.runnerId;
+      if (!to || to === actor) return fail('It runs in your Claude Code; there’s nothing to send.', 'state');
+      const left = leftBehind(s, b.id, actor as MemberId);
+      if (!left.files && !left.commits) return fail('You have nothing of this conversation’s left to send.', 'state');
+      if (moving(s, b.id)) return fail('Its work is already on its way.', 'busy');
+      // Into a folder Claude isn't working in, and a Claude Code that's here to take it.
+      if (activeTurn(s, b.id)) return fail('Wait for the turn to finish, or stop it first.', 'busy');
+      const off = offline(s, ctx, to); if (off) return fail(off, 'state');
+      return ok(
+        { type: 'transfer.started', transfer: { id: ctx.id('tr'), branchId: b.id, from: actor as MemberId, to, status: 'packing', at: ctx.now } },
+        ev(ctx, b.id, 'laptop', `${memberName(s, actor)}’s Claude Code is sending what it kept (${countText(left.files, left.commits)}) to ${memberName(s, to)}’s`),
+      );
+    }
+    case 'work.resend': {
+      // A move's work didn't come in here (this folder said no): ask the computer it's on for it again.
+      const deny = needWrite(); if (deny) return deny;
+      const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
+      if (b.runnerId !== actor) return fail('It doesn’t run in your Claude Code.', 'forbidden');
+      if (moving(s, b.id)) return fail('Its work is already on its way.', 'busy');
+      if (activeTurn(s, b.id)) return fail('Wait for the turn to finish, or stop it first.', 'busy');
+      const last = Object.values(s.transfers ?? {}).filter((x) => x.branchId === b.id && !x.copy && x.to === actor).sort((x, y) => x.at - y.at).pop();
+      if (!last || last.status !== 'failed') return fail('Nothing is waiting to come here.', 'state');
+      const from = last.from;
+      const left = leftBehind(s, b.id, from);
+      if (!left.files && !left.commits) return fail(`${memberName(s, from)}’s computer has nothing of it left to send.`, 'state');
+      if (s.members[from]?.leftAt || (ctx.online && !ctx.online.includes(from))) return fail(`${memberName(s, from)}’s Claude Code isn’t connected right now, and the work is on its computer.`, 'state');
+      return ok(
+        { type: 'transfer.started', transfer: { id: ctx.id('tr'), branchId: b.id, from, to: actor as MemberId, status: 'packing', at: ctx.now } },
+        ev(ctx, b.id, 'laptop', `${memberName(s, actor)}’s Claude Code asked for the work again · it’s on its way from ${memberName(s, from)}’s computer`),
+      );
+    }
+    case 'run.allow': {
+      // The runner says whose turns run in their Claude Code here without asking.
+      const conv = s.conversations[cmd.conversationId];
+      if (!conv) return fail('No such conversation.');
+      const runsSome = Object.values(s.branches).some((b) => b.conversationId === conv.id && b.runnerId === actor);
+      if (!runsSome) return fail('This conversation doesn’t run in your Claude Code.', 'forbidden');
+      const m = s.members[cmd.memberId];
+      if (!m || cmd.memberId === actor) return fail('Pick someone else in the space.');
+      return ok({ type: 'run.allowed', conversationId: conv.id, runnerId: actor as MemberId, memberId: cmd.memberId as MemberId, on: cmd.on });
     }
 
     // ------------------------------------------------------------- decisions
@@ -682,6 +945,11 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const t = s.turns[cmd.turnId];
       if (!t || t.runnerId !== actor) return fail('Not your turn to run.', 'forbidden');
       if (t.status !== 'requested') return fail(`That turn is ${t.status}.`, 'state');
+      // Someone who left or can only read runs nothing shared (security review).
+      const me = s.members[actor as MemberId];
+      if (!isOneOff(t) && (!me || me.leftAt || me.role === 'viewer')) return fail('You can’t run turns here.', 'forbidden');
+      const away = isOneOff(t) ? undefined : moving(s, t.branchId);
+      if (away) return fail(`The work is still on its way to ${memberName(s, away.to)}’s Claude Code.`, 'busy');
       const lease = s.leases[t.branchId];
       if (lease && lease.turnId !== t.id && !isOneOff(t)) return fail('Another turn holds this branch.', 'busy');
       return ok({ type: 'turn.started', turnId: t.id, runnerId: actor as MemberId, model: cmd.model });
@@ -717,7 +985,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         // Declined before anything ran: give the parts back so someone else can send them.
         const out: EventBody[] = [{ type: 'turn.failed', turnId: t.id, failure: cmd.failure }];
         if (t.mode === 'normal' || t.mode === 'view-first' || t.mode === 'weigh') {
-          const restore: Part[] = t.parts.map((p, i) => ({ id: ctx.id('p'), branchId: t.branchId, memberId: p.memberId, text: p.text, at: ctx.now + i, position: p.position, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}) }));
+          const restore: Part[] = restoreOf(ctx, t);
           out.length = 0;
           out.push({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore });
         }
@@ -763,9 +1031,12 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         ...(w.pushed && w.commits?.length ? { pushed: w.pushed } : {}),
         at: ctx.now,
       };
+      // The branch's project, from the Claude Code it runs in (the fingerprint, never the URL).
+      const tb = s.branches[t.branchId];
+      const repo: EventBody[] = cmd.repo && tb && tb.runnerId === actor && tb.repo !== cmd.repo ? [{ type: 'branch.repo', branchId: tb.id, repo: cmd.repo }] : [];
       // Nothing changed and nothing was there before: no event.
-      if (!t.work && !work.noRepo && !work.uncommitted && !work.more && !work.commits) return ok();
-      return ok({ type: 'turn.work', turnId: t.id, work });
+      if (!t.work && !work.noRepo && !work.uncommitted && !work.more && !work.commits) return ok(...repo);
+      return ok({ type: 'turn.work', turnId: t.id, work: { ...work, ...(t.work?.movedTo ? { movedTo: t.work.movedTo } : {}) } }, ...repo);
     }
     case 'runner.pushed': {
       const deny = needWrite(); if (deny) return deny;
@@ -790,6 +1061,38 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const t = s.turns[cmd.turnId];
       if (!t || t.status !== 'paused') return ok();
       return ok({ type: 'turn.resumed', turnId: t.id });
+    }
+    case 'server.transfer-timeout': {
+      const tr = s.transfers?.[cmd.transferId];
+      if (!tr || (tr.status !== 'packing' && tr.status !== 'sending')) return ok();
+      return ok(
+        { type: 'transfer.updated', transferId: tr.id, status: 'failed', summary: 'it took too long' },
+        // A copy of someone's files says nothing on the branch: only its two people knew of it.
+        ...(tr.copy ? [] : [ev(ctx, tr.branchId, 'alert', 'The work couldn’t be sent: it took too long. Only what was pushed came along.')]),
+      );
+    }
+    case 'runner.transfer': {
+      const tr = s.transfers?.[cmd.transferId];
+      if (!tr || (tr.status !== 'packing' && tr.status !== 'sending')) return fail('No such move under way.', 'state');
+      if (cmd.status === 'ready') {
+        if (actor !== tr.from || tr.status !== 'packing' || !cmd.manifest) return fail('Only the Claude Code sending it says it’s ready.', 'forbidden');
+        return ok({ type: 'transfer.updated', transferId: tr.id, status: 'sending', manifest: cmd.manifest });
+      }
+      if (actor !== tr.from && actor !== tr.to) return fail('Not your move.', 'forbidden');
+      if (cmd.status === 'done') {
+        // A copy goes to a browser, which says so itself (files.got).
+        if (actor !== tr.to || tr.status !== 'sending' || tr.copy) return fail('Only the Claude Code receiving it says it arrived.', 'forbidden');
+        const summary = clip((cmd.summary ?? '').trim() || 'it arrived', 200);
+        return ok({ type: 'transfer.updated', transferId: tr.id, status: 'done', summary }, ev(ctx, tr.branchId, 'laptop', `${memberName(s, tr.to)}’s Claude Code has the work: ${summary}`));
+      }
+      const why = clip((cmd.summary ?? '').trim() || 'something went wrong', 200).replace(/[.!]+$/, '');
+      return ok({ type: 'transfer.updated', transferId: tr.id, status: 'failed', summary: why }, ...(tr.copy ? [] : [ev(ctx, tr.branchId, 'alert', `The work couldn’t be sent: ${why}. Only what was pushed came along.`)]));
+    }
+    case 'runner.arrived': {
+      const b = s.branches[cmd.branchId];
+      if (!b || b.runnerId !== actor) return fail('It doesn’t run in your Claude Code.', 'forbidden');
+      const note = cmd.note?.trim();
+      return ok(ev(ctx, b.id, 'laptop', note ? clip(note, 200) : `${memberName(s, actor)}’s Claude Code pulled ${cmd.pulled} commit${cmd.pulled === 1 ? '' : 's'}`));
     }
     case 'runner.schedule': {
       // Claude asked for work later in a turn this runner runs: kept by the space, shown to everyone.
@@ -830,18 +1133,19 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!b || b.state === 'merged' || !runner || runner.leftAt || !writes || !canSee(s, x.by, b.id)) return ok({ type: 'schedule.updated', scheduleId: x.id, patch: { status: 'off', stoppedBy: 'server' } });
       // One turn at a time on a branch: it waits for the running one.
       if (activeTurn(s, b.id)) return fail('Busy.', 'busy');
-      // Someone else's branch with "owner OKs first": it waits for their OK, as a turn sent by hand would.
-      const needsOk = !!b.ownerId && b.ownerId !== x.by && !b.private && s.space.policy.ownerOk && !s.members[b.ownerId]?.leftAt;
+      // It runs where the branch runs now, which may not be where it was set up, and it waits for
+      // the OKs a turn sent by hand would (the branch's owner, the Claude Code it runs in).
+      const route = routeTurn(s, ctx, b, x.by); if (!routed(route)) return route;
+      const oks = oksFor(s, b, x.by, route.runnerId);
       const turn: Turn = {
-        id: ctx.id('t'), branchId: b.id, conversationId: b.conversationId, parts: [{ memberId: x.by, text: x.prompt }], senderId: x.by, runnerId: x.by,
-        mode: 'normal', status: needsOk ? 'held' : 'requested', requestedAt: ctx.now, steps: [], text: '', model: b.model.name, private: b.private || undefined, scheduled: x.id,
+        id: ctx.id('t'), branchId: b.id, conversationId: b.conversationId, parts: [{ memberId: x.by, text: x.prompt }], senderId: x.by, runnerId: route.runnerId,
+        mode: 'normal', status: oks.length ? 'held' : 'requested', requestedAt: ctx.now, steps: [], text: '', model: b.model.name, private: b.private || undefined, scheduled: x.id,
       };
       const left = x.left !== undefined ? x.left - 1 : undefined;
       const again = x.everyMs !== undefined && (left === undefined || left > 0);
       const out: EventBody[] = [];
       if (b.state === 'parked') out.push({ type: 'branch.updated', branchId: b.id, patch: { state: 'active' } });
-      out.push({ type: 'turn.requested', turn, consumed: [] });
-      if (needsOk) out.push({ type: 'ask.created', ask: { id: ctx.id('a'), kind: 'send-in-branch', from: x.by, to: b.ownerId!, branchId: b.id, turnId: turn.id, status: 'open', at: ctx.now } });
+      out.push(...route.events, { type: 'turn.requested', turn, consumed: [] }, ...askEvents(ctx, b, turn, oks));
       out.push({ type: 'schedule.updated', scheduleId: x.id, patch: again ? { next: Math.max(x.next + x.everyMs!, ctx.now + SCHEDULE_MIN_MS), lastTurn: turn.id, ...(left !== undefined ? { left } : {}) } : { status: 'off', lastTurn: turn.id, ...(left !== undefined ? { left } : {}) } });
       return ok(...out);
     }

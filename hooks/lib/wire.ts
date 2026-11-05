@@ -1,7 +1,7 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
 import type { Command } from './commands.ts';
 import type { FilesAction, FilesReport, LiveMessage, LocalAction, LocalReport, SpaceEvent } from './events.ts';
-import type { Color, Id, MemberId, Presence, Role, RunnerInfo, SpaceState, Via } from './types.ts';
+import type { Color, Id, MemberId, Presence, Role, RunnerInfo, SpaceState, Transfer, Via } from './types.ts';
 import type { AskQuestion } from './helpers.ts';
 
 /**
@@ -103,6 +103,10 @@ export type RunnerInbound =
    * Code needn't ask again (their deny rules still hold); absent, it asks as it would anyway.
    */
   | { kind: 'tool.request'; turnId: Id; requestId: string; tool: string; input: Record<string, unknown>; approved?: boolean }
+  /** A move: pack this branch's work, say it's ready (runner.transfer with its manifest), then send it in parts through the relay to `to`'s Claude Code. With `copy`: only those files, for `to`'s browser. */
+  | { kind: 'transfer.send'; transferId: Id; branchId: Id; to: MemberId; copy?: Transfer['copy'] }
+  /** A move's work is on its way from `from`'s Claude Code: take its parts from the relay and check them against `manifest` before applying anything. */
+  | { kind: 'transfer.receive'; transferId: Id; branchId: Id; from: MemberId; manifest: NonNullable<Transfer['manifest']> }
   /** Stop or start picking up turns (from the person's own web app). */
   | { kind: 'pause' }
   | { kind: 'resume' }

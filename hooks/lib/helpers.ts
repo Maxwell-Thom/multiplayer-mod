@@ -1,5 +1,5 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import type { Branch, Decision, Id, ImportTurn, MemberId, Note, Question, SpaceState, Turn, TurnWork } from './types.ts';
+import type { Ask, Branch, Decision, Id, ImportTurn, MemberId, Note, Question, SpaceState, Turn, TurnWork } from './types.ts';
 
 export const ACTIVE_STATUSES: Turn['status'][] = ['requested', 'held', 'conflict', 'running', 'approval', 'paused'];
 
@@ -19,6 +19,49 @@ export function activeTurn(s: SpaceState, branchId: Id): Turn | undefined {
 }
 
 /** A recap or a side question: private to its asker, run once, never part of the branch's history or holding it. */
+/** Whether a turn sent by `senderId` may run in `runnerId`'s Claude Code in this conversation without asking. */
+export function mayRunFor(s: SpaceState, conversationId: Id, runnerId: MemberId, senderId: MemberId): boolean {
+  return runnerId === senderId || !!s.conversations[conversationId]?.allowed?.[runnerId]?.includes(senderId);
+}
+
+/** The asks still waiting on a turn. */
+export function openAsks(s: SpaceState, turnId: Id): Ask[] {
+  return Object.values(s.asks).filter((a) => a.turnId === turnId && a.status === 'open');
+}
+
+/**
+ * What a runner's turns on a branch left only on its computer: uncommitted files and commits not
+ * pushed, from each turn's work report (minus work that has since moved to another Claude Code).
+ */
+export function leftBehind(s: SpaceState, branchId: Id, runnerId: MemberId): { files: number; commits: number } {
+  let files = 0;
+  let commits = 0;
+  for (const t of Object.values(s.turns)) {
+    const w = t.work;
+    if (t.branchId !== branchId || !w || workWhere(t) !== runnerId) continue;
+    files += (w.uncommitted?.length ?? 0) + (w.more ?? 0);
+    if (!w.pushed) commits += w.commits?.length ?? 0;
+  }
+  return { files, commits };
+}
+
+/** Whose computer a turn's changes are on: where a move last took them, else where it ran. */
+export function workWhere(t: Turn): MemberId {
+  return t.work?.movedTo ?? t.runnerId;
+}
+
+/** "2 files and 1 commit", "3 files", "1 commit", or '' for nothing. */
+export function countText(files: number, commits: number): string {
+  const f = files ? `${files} file${files === 1 ? '' : 's'}` : '';
+  const c = commits ? `${commits} commit${commits === 1 ? '' : 's'}` : '';
+  return [f, c].filter(Boolean).join(' and ');
+}
+
+/** Whose Claude Code a branch runs in, or null when nobody's yet. */
+export function branchRunner(s: SpaceState, branchId: Id): MemberId | null {
+  return s.branches[branchId]?.runnerId ?? null;
+}
+
 export function isOneOff(t: Turn): boolean {
   return t.mode === 'recap' || t.mode === 'aside';
 }

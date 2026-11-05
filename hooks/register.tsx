@@ -246,6 +246,11 @@ export const register: Register = (on, options) => {
         <Text dimColor>{fit(`Code ${v.code} · you are ${v.me}`)}</Text>
         <Text color={v.approval ? 'warning' : undefined}>{fit(v.status)}</Text>
         {v.approval ? <Text color="warning">{fit(`Approve in the web app, or /multiplayer allow or deny: ${v.approval.title}`)}</Text> : null}
+        {(v.asks ?? []).slice(0, 3).map((a) => (
+          <Text color="warning">
+            {fit(`${a.from} wants to ${a.kind === 'run-here' ? 'send to your Claude Code' : `move “${a.space}”`} · /multiplayer allow or deny`)}
+          </Text>
+        ))}
         <Text> </Text>
         <Text bold>People</Text>
         {v.people.map((p) => (

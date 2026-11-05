@@ -18,7 +18,8 @@ export type Command =
   | { type: 'conversation.create'; title?: string; carry: boolean; filesFromMain: boolean; model?: string }
   | { type: 'conversation.rename'; conversationId: Id; title: string }
   /** An edit (editOf) sends editParts, each person's part kept as theirs; editText is the older one-text form. */
-  | { type: 'branch.fork'; fromBranchId: Id; atTurnId?: Id; private?: boolean; name?: string; editOf?: Id; editText?: string; editParts?: { memberId: Id; text: string }[] }
+  /** `inMine`: the branch runs in my Claude Code, not where its parent runs ("Branch off in my Claude Code"). */
+  | { type: 'branch.fork'; fromBranchId: Id; atTurnId?: Id; private?: boolean; name?: string; editOf?: Id; editText?: string; editParts?: { memberId: Id; text: string }[]; inMine?: boolean }
   | { type: 'branch.state'; branchId: Id; state: 'parked' | 'active' }
   | { type: 'branch.rename'; branchId: Id; name: string }
   | { type: 'branch.model'; branchId: Id; name: string; effort: 'low' | 'medium' | 'high' }
@@ -29,7 +30,8 @@ export type Command =
   | { type: 'part.add'; branchId: Id; text: string; position?: boolean; id?: Id; cites?: Id; files?: Id[] }
   | { type: 'part.remove'; partId: Id }
   /** `plan`: Claude Code's plan mode: it plans first, and builds once its sender approves the plan. */
-  | { type: 'turn.send'; branchId: Id; mode?: 'normal' | 'view-first'; handoffId?: Id; plan?: boolean }
+  /** `runIn`: for a branch that runs in nobody's Claude Code yet, whose it starts in (else the sender's). */
+  | { type: 'turn.send'; branchId: Id; mode?: 'normal' | 'view-first'; handoffId?: Id; plan?: boolean; runIn?: MemberId }
   | { type: 'turn.resolve'; turnId: Id; pick: string }
   | { type: 'turn.stop'; turnId: Id }
   | { type: 'turn.takeover'; turnId: Id }
@@ -37,7 +39,16 @@ export type Command =
   | { type: 'turn.reveal'; turnId: Id }
   | { type: 'handoff.offer'; branchId: Id; to: MemberId }
   | { type: 'handoff.cancel'; handoffId: Id }
-  | { type: 'ask.answer'; askId: Id; allow: boolean }
+  /** `always`: for a turn in my Claude Code, "Yes, and don't ask again for them here". */
+  | { type: 'ask.answer'; askId: Id; allow: boolean; always?: boolean }
+  /** "Move to my Claude Code": at once if its Claude Code is offline or gone, else its runner is asked. */
+  | { type: 'work.move'; branchId: Id }
+  /** The runner offers the branch's work to someone's Claude Code; they accept. */
+  | { type: 'work.offer'; branchId: Id; to: MemberId }
+  /** A Claude Code the work moved away from (while it was offline) sends what it kept. */
+  | { type: 'work.send'; branchId: Id }
+  /** The runner allows (or stops allowing) someone's turns in their Claude Code in this conversation. */
+  | { type: 'run.allow'; conversationId: Id; memberId: MemberId; on: boolean }
   // decisions, questions, chat
   | { type: 'decision.propose'; branchId: Id; text: string; replaces?: string }
   | { type: 'decision.approve'; decisionId: string }
@@ -71,9 +82,21 @@ export type Command =
   | { type: 'runner.question'; turnId: Id; text: string }
   | { type: 'runner.pushed'; push: Omit<FilesPush, 'id' | 'memberId' | 'at'> }
   /** What a turn changed in its runner's folder: sent when it ends, and again when that changes (committed, pushed). */
-  | { type: 'runner.work'; turnId: Id; work: Omit<TurnWork, 'at'> }
+  /** `repo`: the folder's project fingerprint (see Branch.repo). */
+  | { type: 'runner.work'; turnId: Id; work: Omit<TurnWork, 'at'>; repo?: string }
+  /** The sender says its work is packed (with what to check), or either end says how it went. */
+  | { type: 'runner.transfer'; transferId: Id; status: 'ready' | 'done' | 'failed'; summary?: string; manifest?: { size: number; sha256: string; chunks: number } }
+  /** A move from an offline Claude Code: what the new one pulled from the remote. */
+  | { type: 'runner.arrived'; branchId: Id; pulled: number; note?: string }
+  /** Get these files: a copy of a turn's files made outside git, from its runner's computer to my browser. */
+  /** The work a move sent didn't come in here: ask the computer it's on for it again. */
+  | { type: 'work.resend'; branchId: Id }
+  | { type: 'files.get'; turnId: Id }
+  /** My browser has the copy (or couldn't take it). */
+  | { type: 'files.got'; transferId: Id; ok: boolean }
   // server only
   | { type: 'server.pause'; turnId: Id }
+  | { type: 'server.transfer-timeout'; transferId: Id }
   | { type: 'server.resume'; turnId: Id }
   /** Claude, in a turn this runner runs, sets up work for later: in `inMs`, then every `everyMs`, `times` times at most. */
   | { type: 'runner.schedule'; turnId: Id; prompt: string; inMs?: number; everyMs?: number; times?: number }
@@ -92,4 +115,8 @@ export interface CommandContext {
   source: 'web' | 'runner' | 'mcp' | 'server';
   now: number;
   id: (prefix: string) => string;
+  /** Members whose runner is connected now, as the server knows it. Absent: assume everyone is. */
+  online?: MemberId[];
+  /** Each online runner's project fingerprint (Branch.repo), as the server knows it; never broadcast. */
+  repos?: Record<MemberId, string | null>;
 }

@@ -70,6 +70,8 @@ export interface Conversation {
   /** Decision ids carried in from earlier conversations. */
   carried: string[];
   filesFromMain: boolean;
+  /** Whose turns may run in whose Claude Code here without asking: runner → senders they allowed. */
+  allowed?: Record<MemberId, MemberId[]>;
 }
 
 export interface ModelPin {
@@ -94,6 +96,13 @@ export interface Branch {
   state: 'active' | 'parked' | 'merged';
   model: ModelPin;
   createdAt: number;
+  /**
+   * Whose Claude Code this branch's turns run in (their folder, their plan), whoever sends them.
+   * Null or absent: not yet decided; the next send decides it (Maxwell, 2026-11-04).
+   */
+  runnerId?: MemberId | null;
+  /** The project its work is in: a fingerprint of the folder's git origin (never the URL), from its runner. */
+  repo?: string;
 }
 
 export interface Part {
@@ -273,9 +282,16 @@ export interface TurnWork {
   commits?: { sha: string; subject: string }[];
   /** Once those commits are on the remote: the branch they're on. */
   pushed?: string;
+  /** The work moved to this member's Claude Code (a finished transfer): it's no longer only on the runner's computer. */
+  movedTo?: MemberId;
   /** When its runner last checked. */
   at: number;
 }
+
+/** The most a move carries machine to machine; more than that should be pushed. */
+export const TRANSFER_MAX_BYTES = 200 * 1024 * 1024;
+/** One relay chunk. */
+export const TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 
 /** Most files a turn's work names; the rest count in `more`. */
 export const WORK_FILES_MAX = 20;
@@ -366,16 +382,43 @@ export interface Merge {
   noteTurnId?: Id;
 }
 
+/**
+ * Something waiting for one person's yes: a turn in their branch ('send-in-branch'), a turn in
+ * their Claude Code ('run-here', Claude Code's own permission prompt), or moving a branch's work
+ * between Claude Codes ('move', to `moveTo`'s).
+ */
 export interface Ask {
   id: Id;
-  kind: 'send-in-branch';
+  kind: 'send-in-branch' | 'run-here' | 'move';
   from: MemberId;
   to: MemberId;
   branchId: Id;
-  /** The turn waiting for the answer. */
+  /** The turn waiting for the answer (none for a move). */
   turnId: Id;
-  status: 'open' | 'allowed' | 'declined';
+  /** A move: whose Claude Code the branch would run in. */
+  moveTo?: MemberId;
+  /** 'closed': its turn ended some other way before anyone answered. */
+  status: 'open' | 'allowed' | 'declined' | 'closed';
   at: number;
+}
+
+/** A move's work, sent straight from one Claude Code to another through the server's relay. */
+export interface Transfer {
+  id: Id;
+  branchId: Id;
+  from: MemberId;
+  to: MemberId;
+  /** packing: the sender is building it; sending: chunks are flowing; then done or failed. */
+  status: 'packing' | 'sending' | 'done' | 'failed';
+  at: number;
+  /** What the receiver checks before applying anything. */
+  manifest?: { size: number; sha256: string; chunks: number };
+  summary?: string;
+  /**
+   * Not a move: a copy of one turn's files made outside git, straight from the computer that made
+   * them to the browser of whoever asked. Only those two see it, and the conversation goes on.
+   */
+  copy?: { turnId: Id; paths: string[] };
 }
 
 export interface Handoff {
@@ -424,7 +467,7 @@ export interface FilesPush {
 export type TimelineItem =
   | { kind: 'turn'; id: Id }
   | { kind: 'note'; id: Id }
-  | { kind: 'event'; id: Id; icon: string; actor: MemberId | 'server'; text: string; at: number; link?: { kind: 'branch' | 'decision' | 'merge' | 'map'; id?: string; label: string } };
+  | { kind: 'event'; id: Id; icon: string; actor: MemberId | 'server'; text: string; at: number; link?: { kind: 'branch' | 'decision' | 'merge' | 'map' | 'work'; id?: string; label: string } };
 
 export interface SpaceState {
   seq: number;
@@ -456,6 +499,8 @@ export interface SpaceState {
   files?: Record<Id, SharedFile>;
   /** Background work set up in shared turns, by id. */
   schedules?: Record<Id, Schedule>;
+  /** A branch's work on its way from one Claude Code to another (machine to machine; the server keeps none of it). */
+  transfers?: Record<Id, Transfer>;
 }
 
 /** Live, never stored: who is doing what right now. */
@@ -478,6 +523,8 @@ export interface RunnerInfo {
   account?: string;
   cwd?: string;
   git?: { repo?: string; branch?: string; dirty?: boolean };
+  /** The project's fingerprint (16 hex of sha256 over the space id and its origin URL): for the server's move check, never shown to others. */
+  repo?: string;
   sandbox?: boolean;
   /** Not picking up turns until resumed. */
   paused?: boolean;

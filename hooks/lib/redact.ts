@@ -21,9 +21,16 @@ export function canSeeTurn(s: SpaceState, memberId: MemberId, t: Turn | undefine
 
 export function redactState(full: SpaceState, memberId: MemberId): SpaceState {
   // What someone shares from their own world is theirs to see.
-  const s: SpaceState = full.sharing && Object.keys(full.sharing).some((k) => k !== memberId)
+  let s: SpaceState = full.sharing && Object.keys(full.sharing).some((k) => k !== memberId)
     ? { ...full, sharing: full.sharing[memberId] ? { [memberId]: full.sharing[memberId] } : {} }
     : full;
+  // A project's fingerprint is for the server's check only: it could confirm a guess of someone's repository.
+  if (Object.values(s.branches).some((b) => b.repo)) {
+    s = { ...s, branches: Object.fromEntries(Object.entries(s.branches).map(([k, b]) => [k, b.repo ? (({ repo: _, ...rest }) => rest)(b) : b])) };
+  }
+  // A copy of someone's files is between its two people.
+  const theirs = (x: NonNullable<SpaceState['transfers']>[string]) => !x.copy || x.from === memberId || x.to === memberId;
+  if (s.transfers && !Object.values(s.transfers).every(theirs)) s = { ...s, transfers: Object.fromEntries(Object.entries(s.transfers).filter(([, x]) => theirs(x))) };
   const hiddenBranches = new Set(Object.values(s.branches).filter((b) => !canSee(s, memberId, b.id)).map((b) => b.id));
   const hiddenTurns = new Set(Object.values(s.turns).filter((t) => !canSeeTurn(s, memberId, t)).map((t) => t.id));
   if (!hiddenBranches.size && !hiddenTurns.size) return s;
@@ -51,6 +58,7 @@ export function redactState(full: SpaceState, memberId: MemberId): SpaceState {
     pushes: s.pushes.filter((p) => !p.branchId || !hiddenBranches.has(p.branchId)),
     notes: Object.fromEntries(Object.entries(s.notes).filter(([, n]) => !hiddenBranches.has(n.branchId))),
     ...(s.schedules ? { schedules: Object.fromEntries(Object.entries(s.schedules).filter(([, x]) => !hiddenBranches.has(x.branchId))) } : {}),
+    ...(s.transfers ? { transfers: Object.fromEntries(Object.entries(s.transfers).filter(([, x]) => !hiddenBranches.has(x.branchId) && (!x.copy || x.from === memberId || x.to === memberId))) } : {}),
     ...(s.files ? { files: Object.fromEntries(Object.entries(s.files).filter(([, f]) => !hiddenBranches.has(f.branchId) && !(f.turnId && hiddenTurns.has(f.turnId)))) } : {}),
   };
 }
@@ -77,6 +85,7 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
   };
   switch (e.type) {
     case 'branch.created': return branchAudience(e.branch.id);
+    case 'branch.runner': return branchAudience(e.branchId);
     case 'branch.updated':
     case 'branch.model': return branchAudience(e.branchId);
     case 'part.added': return branchAudience(e.part.branchId);
@@ -111,6 +120,15 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
     case 'handoff.updated': return branchAudience((after.handoffs[e.handoffId] ?? before.handoffs[e.handoffId])?.branchId);
     case 'ask.created': return branchAudience(e.ask.branchId);
     case 'ask.answered': return branchAudience((after.asks[e.askId] ?? before.asks[e.askId])?.branchId);
+    case 'ask.closed': return branchAudience((after.asks[e.askId] ?? before.asks[e.askId])?.branchId);
+    // The project's fingerprint stays on the server (redactState leaves it out too).
+    case 'branch.repo': return [];
+    // A copy of someone's files is between the two of them; a move is the branch's business.
+    case 'transfer.started': return e.transfer.copy ? [e.transfer.from, e.transfer.to] : branchAudience(e.transfer.branchId);
+    case 'transfer.updated': {
+      const tr = after.transfers?.[e.transferId] ?? before.transfers?.[e.transferId];
+      return tr?.copy ? [tr.from, tr.to] : branchAudience(tr?.branchId);
+    }
     case 'decision.proposed': return branchAudience(e.decision.branchId);
     case 'question.added': return branchAudience(e.question.branchId);
     case 'decision.approved':

@@ -1,6 +1,7 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
 import type { SpaceEvent } from './events.ts';
 import type { SpaceState, Turn, TimelineItem } from './types.ts';
+import { isOneOff, workWhere } from './helpers.ts';
 
 /** The state before any event: only valid once `space.created` is applied. */
 export function emptyState(): SpaceState {
@@ -58,6 +59,14 @@ function releaseLease(s: SpaceState, turnId: string): SpaceState {
 }
 
 /** Folds one event into the state. Pure: returns a new state, sharing what didn't change. */
+/** A turn that ended before anyone answered its asks closes them: nobody can answer them later. */
+function closeAsks(s: SpaceState, turnId: string): SpaceState {
+  const open = Object.values(s.asks).filter((a) => a.turnId === turnId && a.status === 'open');
+  if (!open.length) return s;
+  s.asks = { ...s.asks, ...Object.fromEntries(open.map((a) => [a.id, { ...a, status: 'closed' as const }])) };
+  return s;
+}
+
 export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
   let s: SpaceState = { ...prev, seq: e.seq };
   switch (e.type) {
@@ -136,6 +145,19 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
       s.timeline = { ...s.timeline, [e.branch.id]: [] };
       s.parts = { ...s.parts, [e.branch.id]: [] };
       return s;
+    case 'run.allowed': {
+      const c = s.conversations[e.conversationId];
+      if (!c) return s;
+      const had = c.allowed?.[e.runnerId] ?? [];
+      const next = e.on ? [...new Set([...had, e.memberId])] : had.filter((m) => m !== e.memberId);
+      s.conversations = { ...s.conversations, [c.id]: { ...c, allowed: { ...c.allowed, [e.runnerId]: next } } };
+      return s;
+    }
+    case 'branch.runner': {
+      const b = s.branches[e.branchId];
+      if (b) s.branches = { ...s.branches, [b.id]: { ...b, runnerId: e.runnerId } };
+      return s;
+    }
     case 'branch.updated': {
       const b = s.branches[e.branchId];
       if (b) s.branches = { ...s.branches, [b.id]: { ...b, ...e.patch } };
@@ -158,6 +180,9 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'turn.requested': {
       const t = e.turn;
       s.turns = { ...s.turns, [t.id]: t };
+      // A log from before branches had a runner: the branch runs where its first turn ran.
+      const tb = s.branches[t.branchId];
+      if (tb && tb.runnerId === undefined && !isOneOff(t) && t.mode !== 'merge-note') s.branches = { ...s.branches, [tb.id]: { ...tb, runnerId: t.runnerId } };
       if (e.consumed.length) {
         const gone = new Set(e.consumed);
         s.parts = { ...s.parts, [t.branchId]: (s.parts[t.branchId] || []).filter((p) => !gone.has(p.id)) };
@@ -178,7 +203,7 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
       s.turns = turns;
       s.timeline = { ...s.timeline, [t.branchId]: (s.timeline[t.branchId] || []).filter((i) => !(i.kind === 'turn' && i.id === e.turnId)) };
       s.parts = { ...s.parts, [t.branchId]: [...e.restore, ...(s.parts[t.branchId] || [])] };
-      return releaseLease(s, e.turnId);
+      return releaseLease(closeAsks(s, e.turnId), e.turnId);
     }
     case 'turn.started': {
       const t = s.turns[e.turnId];
@@ -224,7 +249,7 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     }
     case 'turn.stopped':
       s = patchTurn(s, e.turnId, { status: 'stopped', stoppedBy: e.by, endedAt: e.at });
-      return releaseLease(s, e.turnId);
+      return releaseLease(closeAsks(s, e.turnId), e.turnId);
     case 'turn.work':
       return patchTurn(s, e.turnId, { work: e.work });
     case 'handoff.offered':
@@ -241,6 +266,32 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'ask.answered': {
       const a = s.asks[e.askId];
       if (a) s.asks = { ...s.asks, [a.id]: { ...a, status: e.allow ? 'allowed' : 'declined' } };
+      return s;
+    }
+    case 'ask.closed': {
+      const a = s.asks[e.askId];
+      if (a && a.status === 'open') s.asks = { ...s.asks, [a.id]: { ...a, status: 'closed' } };
+      return s;
+    }
+    case 'branch.repo': {
+      const b = s.branches[e.branchId];
+      if (b) s.branches = { ...s.branches, [b.id]: { ...b, repo: e.repo } };
+      return s;
+    }
+    case 'transfer.started':
+      s.transfers = { ...s.transfers, [e.transfer.id]: e.transfer };
+      return s;
+    case 'transfer.updated': {
+      const tr = s.transfers?.[e.transferId];
+      if (!tr) return s;
+      s.transfers = { ...s.transfers, [tr.id]: { ...tr, status: e.status, ...(e.manifest ? { manifest: e.manifest } : {}), ...(e.summary ? { summary: e.summary } : {}) } };
+      // Arrived: what the sender's turns left on its computer is on the receiver's now.
+      if (e.status === 'done' && !tr.copy) {
+        // Every turn's changes that were on that computer, its own or moved there before; back home, none is "moved".
+        const moved = Object.values(s.turns).filter((t) => t.branchId === tr.branchId && t.work && workWhere(t) === tr.from);
+        const to = (t: Turn): Turn => { const { movedTo: _, ...rest } = t.work!; return { ...t, work: tr.to === t.runnerId ? rest : { ...rest, movedTo: tr.to } }; };
+        if (moved.length) s.turns = { ...s.turns, ...Object.fromEntries(moved.map((t) => [t.id, to(t)])) };
+      }
       return s;
     }
     case 'decision.proposed':
