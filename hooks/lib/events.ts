@@ -114,6 +114,8 @@ export interface LocalSession {
   /** The Claude Code session I'm in right now. */
   current?: boolean;
   turns: number;
+  /** Already brought into this space: the conversation it became. */
+  inSpace?: string;
   /** When it was last written to. */
   at: number;
 }

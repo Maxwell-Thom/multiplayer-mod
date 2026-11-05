@@ -47,6 +47,9 @@ const STORE_BRANCHES_BY_FOLDER = 'branchSessionsByFolder'
 const SESSION_MAX_BYTES = 4 * 1024 * 1024
 /** This Claude Code's account sign-ins, one per server (from /multiplayer login). */
 const STORE_ACCOUNTS = 'accounts'
+/** Claude Code sessions brought into spaces: session id → where they went (newest last). */
+const STORE_BROUGHT = 'brought'
+type Brought = { sessionId: string; spaceId: string; conversationId: string; at: number }
 /** A Claude Code session's transcript file. */
 const SESSION_FILE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$/i
 /** How many of the newest session files a listing looks at, and how many it lists. */
@@ -2000,6 +2003,13 @@ export class Runner {
     const current = await soft(() => this.io.sessionId())
     const sessions: LocalSession[] = []
     let tooLong = 0
+    // Brought into this space before, and still here: the conversation it became.
+    const kept = ((await soft(() => this.io.storeGet(STORE_BROUGHT))) ?? []) as Brought[]
+    const st = this.state
+    const inSpace = (id: string) => {
+      const b = (Array.isArray(kept) ? kept : []).filter((x) => x.sessionId === id && x.spaceId === this.session?.spaceId).reverse().find((x) => st?.conversations[x.conversationId])
+      return b ? st!.conversations[b.conversationId].title : undefined
+    }
     for (const f of (await this.sessionFiles()).slice(0, LOCAL_SCAN)) {
       if (sessions.length >= LOCAL_MAX) break
       if (f.size > SESSION_MAX_BYTES) { tooLong++; continue }
@@ -2009,6 +2019,7 @@ export class Runner {
       sessions.push({
         id: f.id, title: clip(s.title, 120), folder: folder ? this.shortFolder(folder) : '',
         here: !!folder && folderKeyOf(folder) === this.folderKey(), ...(f.id === current ? { current: true } : {}), turns: s.turns.length, at: Math.round(f.at),
+        ...(inSpace(f.id) ? { inSpace: inSpace(f.id) } : {}),
       })
     }
     return { sessions, tooLong }
@@ -2147,6 +2158,12 @@ export class Runner {
         ? 'Everyone there sees the whole conversation. Your turns on it carry on here from a copy of this session; the session itself is left as it was.'
         : `Everyone there sees the whole conversation. It ran in another folder${opts.folder ? ` (${opts.folder})` : ''}, so your turns on it carry on in this folder from the conversation itself, as notes. Claude here reads this folder's files, not that one's.`,
     ].join('\n')
+    const spaceId = this.session?.spaceId
+    if (spaceId && conversationId) {
+      const kept = ((await soft(() => this.io.storeGet(STORE_BROUGHT))) ?? []) as Brought[]
+      const next = [...(Array.isArray(kept) ? kept : []), { sessionId, spaceId, conversationId, at: Date.now() }].slice(-200)
+      await soft(() => this.io.storeSet(STORE_BROUGHT, next))
+    }
     return { ok: true, text, conversationId, turns: brought }
   }
 

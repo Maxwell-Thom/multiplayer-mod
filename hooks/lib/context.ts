@@ -208,7 +208,7 @@ export function buildTurnContext(s: SpaceState, turn: Turn, opts: ContextOptions
     ].join('\n'));
   } else context.push([
     `This is a shared conversation in Multiplayer, space “${s.space.name}”${conv ? `, conversation “${conv.title}”` : ''}${branch && !main ? `, branch “${branch.name}”` : ''}.`,
-    `Several people write each turn together; each part is labelled with who wrote it. People here: ${here.map((m) => `${m.name} (${m.role})`).join(', ')}.`,
+    `Several people write each turn together; each part is labelled with who wrote it. People here: ${here.map((m) => `${m.name} (${m.role})`).join(', ')}. Call them by their names (not he or she: a name doesn't tell you).`,
     `You are running on ${runner}'s machine, on ${runner}'s own plan. Treat everyone's parts equally.`,
     `Keep ${runner}'s personal memory, notes and unrelated files out of this shared conversation unless ${runner} asks for them here.`,
     `When the group settles something, record it with the propose_decision tool. When something stays open, use add_question. Don't record things nobody has agreed on.`,
@@ -349,7 +349,7 @@ export function sessionSystem(s: SpaceState, turn: Turn): string {
     ].join('\n');
   }
   return [
-    `This session is a shared conversation in Multiplayer, ${where}. Several people write each turn together, and each part is labelled with who wrote it; treat everyone's parts equally.`,
+    `This session is a shared conversation in Multiplayer, ${where}. Several people write each turn together, and each part is labelled with who wrote it; treat everyone's parts equally, and call people by their names (not he or she: a name doesn't tell you).`,
     `It runs on ${runner}'s machine and plan, but everyone in the space reads your answers. Keep ${runner}'s personal memory, notes, credentials and unrelated files out of it unless they're asked for in the turn.`,
     `It works in ${runner}'s own folder. Everyone else's turns run in their own copies, so a change from someone else's turn is here only once it's pushed and pulled; "Where the code is" notes say which changes this folder has.`,
     `Turns this session didn't run itself (other people's, or ones stopped or cut short) reach you as "[Multiplayer]" notes before the prompt, word for word.`,
