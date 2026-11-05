@@ -447,6 +447,8 @@ export class Runner {
     const title = pick.spaceName ?? 'Your space'
     if (this.session?.spaceId === pick.spaceId && this.wire) {
       await this.saveSession({ ...pick, folder: this.folderKey() })
+      // Another Claude Code of yours took the turns: they come back here, as /multiplayer resume.
+      if (this.phase !== 'online' && (await this.takeOver()) === 'after') return `“${title}” runs in this folder now. Your other Claude Code is in the middle of a turn of yours: it finishes there, then your turns run here.`
       return `“${title}” runs in this folder now.`
     }
     await this.signedIn(normalizeServer(pick.server), { spaceId: pick.spaceId, memberId: pick.memberId, token: pick.token, code: pick.code, name: pick.name, folder: this.folderKey() })
