@@ -655,6 +655,9 @@ async function unpackPlain(sh: MoveShell, o: { folder: string; file: string; exp
   const held = await heldBack(sh, null, o.folder, entries, { cwd: tmp, gitDir: gd, before: null })
   const heldSet = new Set([...held.code, ...held.secret])
   const coming = entries.filter((e) => !heldSet.has(e.path))
+  // What now holds what came, under the names it's here by: carried on in the next move. Never a
+  // file of the person's own that a copy went beside.
+  const landed: string[] = []
   for (const e of coming) {
     if (e.mode === '120000' || e.mode === '160000') continue
     // A file already here, in any case (NOTES.txt is notes.txt on most disks): its name as it is.
@@ -669,7 +672,7 @@ async function unpackPlain(sh: MoveShell, o: { folder: string; file: string; exp
     const there = await here(e.path)
     if (there) {
       const now = await idOf(there)
-      if (now === e.sha) continue
+      if (now === e.sha) { landed.push(there); continue }
       if (o.sent?.[e.path] && now === o.sent[e.path]) {
         // The copy that left here, untouched since: it's updated where it is.
         to = there
@@ -680,18 +683,19 @@ async function unpackPlain(sh: MoveShell, o: { folder: string; file: string; exp
         while (alongside && (await idOf(alongside)) !== e.sha && n < 50) alongside = await here(besideName(e.path, m.from, ++n))
         to = besideName(e.path, m.from, n)
         beside.push([there, to])
-        if (alongside) continue
+        if (alongside) { if ((await idOf(alongside)) === e.sha) landed.push(alongside); continue }
       }
     }
     const r = await sh.run(['curl', '-sS', '--create-dirs', '-o', slash(`${o.folder}/${to}`), fileUrl(`${stage}/${e.path}`)], { timeoutMs: 120_000 }).catch(() => ({ exitCode: 1 }))
     if (r.exitCode !== 0) return { error: `Couldn’t write ${to} in your folder.` }
+    landed.push(to)
   }
   const besideText = beside.length === 1
     ? ` · ${beside[0][0]} was different here, so ${m.from}’s is ${beside[0][1]}`
     : beside.length ? ` · ${beside.length} files were different here, so ${m.from}’s copies sit beside them, named “(from ${m.from})”` : ''
   const leftText = m.left.length ? ` · ${listText(m.left.slice(0, 4))} stayed on ${m.from}’s computer` : ''
   const heldText = heldNotes(held).map((x) => ` · ${x}`).join('')
-  o.onArrived?.(coming.map((e) => e.path))
+  o.onArrived?.(landed)
   return { summary: clip200(`${workText(0, coming.length)} came along${besideText}${heldText}${leftText}`) }
 }
 
