@@ -80,6 +80,9 @@ export const TOOL_QUESTION = 'mcp__multiplayer__add_question'
 export const TOOL_SCHEDULE_LOOK = ['mcp__multiplayer__list_schedules', 'mcp__multiplayer__stop_schedule']
 
 /** Claude Code's arguments for one turn of a branch session (the prompt goes on standard input). */
+/** How long the turn's MCP calls may wait quietly (a person deciding on a permission prompt). */
+export const MCP_WAIT_MS = 15 * 60_000
+
 export function childArgs(o: ChildOptions): string[] {
   const session = o.plan.kind === 'new' ? ['--session-id', o.plan.id]
     : o.plan.kind === 'resume' ? ['--resume', o.plan.id]
@@ -93,7 +96,10 @@ export function childArgs(o: ChildOptions): string[] {
     ...(o.effort && /^(low|medium|high|xhigh|max)$/.test(o.effort) ? ['--effort', o.effort] : []),
     '--append-system-prompt', o.system,
     '--name', cleanName(o.name),
-    '--mcp-config', JSON.stringify({ mcpServers: { multiplayer: { type: 'http', url: o.mcpUrl } } }),
+    // `timeout`: its permission prompt waits for a person, silently. Claude Code gives up on an MCP
+    // call that's quiet for 5 minutes (found live: an approval left 5 minutes failed); the server
+    // answers within 12 ("ask again"), so 15 is never reached.
+    '--mcp-config', JSON.stringify({ mcpServers: { multiplayer: { type: 'http', url: o.mcpUrl, timeout: MCP_WAIT_MS } } }),
     '--permission-prompt-tool', TOOL_APPROVE,
     ...(o.permissionMode ? ['--permission-mode', o.permissionMode] : []),
     '--allowedTools', allowed.join(','),
