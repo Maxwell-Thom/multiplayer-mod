@@ -91,6 +91,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'server.resume': { turnId: 'id' },
   'server.note': { turnId: 'id', text: 'str:200000' },
   'server.steers-taken': { turnId: 'id', through: 'num' },
+  'server.steers-out': { turnId: 'id', through: 'num' },
   'server.file': { file: 'obj' },
   'server.schedule-fire': { scheduleId: 'id' },
   'runner.schedule': { turnId: 'id', prompt: 'str:4000', inMs: 'num?', everyMs: 'num?', times: 'num?' },

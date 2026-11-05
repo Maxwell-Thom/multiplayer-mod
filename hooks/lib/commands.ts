@@ -112,7 +112,8 @@ export type Command =
   /** Its bytes are stored: the file joins the space (the upload route sends this). */
   | { type: 'server.file'; file: SharedFile }
   | { type: 'server.note'; turnId: Id; text: string }
-  | { type: 'server.steers-taken'; turnId: Id; through: number };
+  | { type: 'server.steers-taken'; turnId: Id; through: number }
+  | { type: 'server.steers-out'; turnId: Id; through: number };
 
 export type CommandType = Command['type'];
 

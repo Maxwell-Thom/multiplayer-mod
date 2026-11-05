@@ -257,6 +257,11 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
       if (t) s = patchTurn(s, e.turnId, { steers: [...(t.steers ?? []), e.steer] });
       return s;
     }
+    case 'turn.steers-out': {
+      const t = s.turns[e.turnId];
+      if (t && e.through > (t.steersOut ?? 0)) s = patchTurn(s, e.turnId, { steersOut: e.through });
+      return s;
+    }
     case 'turn.unsteered': {
       const t = s.turns[e.turnId];
       if (t) s = patchTurn(s, e.turnId, { steers: (t.steers ?? []).map((x) => (e.ns.includes(x.n) ? { ...x, withdrawn: true } : x)) });

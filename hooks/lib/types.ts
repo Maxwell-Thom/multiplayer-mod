@@ -308,6 +308,8 @@ export interface Turn {
   suggestion?: string;
   /** The last steer its session read (as a tool call finished); the rest go with the next prompt. */
   steersTaken?: number;
+  /** The last steer its session was handed (read or not): from there on, none can be taken back. */
+  steersOut?: number;
   failure?: TurnFailure;
   conflict?: { summary: string; conflicting: number[]; options: { key: string; label: string; memberId?: MemberId }[] };
   /** Set once people settled a conflict, so the runner doesn't check again. */

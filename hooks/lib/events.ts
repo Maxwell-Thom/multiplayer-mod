@@ -55,6 +55,7 @@ export type EventBody =
   | { type: 'turn.steered'; turnId: Id; steer: Steer }
   | { type: 'turn.steers-taken'; turnId: Id; through: number }
   | { type: 'turn.unsteered'; turnId: Id; ns: number[] }
+  | { type: 'turn.steers-out'; turnId: Id; through: number }
   | { type: 'turn.done'; turnId: Id; text: string; usage?: Usage; model?: string; effort?: string; fast?: boolean; notices?: string[]; suggestion?: string; replies?: string[]; thinking?: string }
   | { type: 'turn.failed'; turnId: Id; failure: TurnFailure }
   | { type: 'turn.stopped'; turnId: Id; by: MemberId }

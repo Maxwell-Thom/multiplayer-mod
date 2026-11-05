@@ -182,7 +182,8 @@ function routeTurn(s: SpaceState, ctx: CommandContext, branch: Branch, senderId:
  * draft as parts, so nothing is lost.
  */
 function queuedAfter(s: SpaceState, ctx: CommandContext, t: Turn, ended: 'done' | 'stopped' | 'failed'): EventBody[] {
-  const unread = (t.steers ?? []).filter((x) => x.n > (t.steersTaken ?? 0) && !x.withdrawn);
+  // (A refused command never becomes a part, whenever it was queued.)
+  const unread = (t.steers ?? []).filter((x) => x.n > (t.steersTaken ?? 0) && !x.withdrawn && !slashRefusal(x.text));
   const b = s.branches[t.branchId];
   if (!unread.length || !b || isOneOff(t) || b.state === 'merged') return [];
   const back = (): EventBody[] => unread.map((x, i) => ({ type: 'part.added', part: { id: ctx.id('p'), branchId: b.id, memberId: x.by, text: x.text, at: ctx.now + i } }));
@@ -609,13 +610,16 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const refused = steerRefusal(s, t, actor as MemberId); if (refused) return fail(refused);
       const text = cmd.text.trim();
       if (!text) return fail('Write something to add.');
+      // It can become a turn's part (when Claude doesn't read it in time): checked as a part is.
+      const refusedCmd = slashRefusal(text); if (refusedCmd) return fail(refusedCmd);
       if ((t.steers?.length ?? 0) >= 20) return fail('That’s a lot to add to one turn. Add the rest to the next prompt.');
       return ok({ type: 'turn.steered', turnId: t.id, steer: { n: (t.steers?.length ?? 0) + 1, by: actor as MemberId, text, at: ctx.now } });
     }
     case 'turn.unsteer': {
       const t = s.turns[cmd.turnId];
       if (!seesTurn(t)) return fail('No such turn.');
-      const mine = (t.steers ?? []).filter((x) => x.by === actor && !x.withdrawn && x.n > (t.steersTaken ?? 0));
+      // Only what the session hasn't been handed yet (it may have read the rest).
+      const mine = (t.steers ?? []).filter((x) => x.by === actor && !x.withdrawn && x.n > Math.max(t.steersTaken ?? 0, t.steersOut ?? 0));
       if (!isActive(t) || !mine.length) return fail('Nothing of yours is waiting for Claude.');
       return ok({ type: 'turn.unsteered', turnId: t.id, ns: mine.map((x) => x.n) });
     }
@@ -1280,6 +1284,11 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (s.files?.[f.id!]) return ok();
       const file: SharedFile = { id: f.id!, name: f.name!, type: f.type!, size: f.size, by: f.by as MemberId, at: ctx.now, branchId: f.branchId!, from: f.from, ...(f.turnId ? { turnId: f.turnId } : {}) };
       return ok({ type: 'file.added', file });
+    }
+    case 'server.steers-out': {
+      const t = s.turns[cmd.turnId];
+      if (!t || !(cmd.through > (t.steersOut ?? 0)) || cmd.through > (t.steers?.length ?? 0)) return ok();
+      return ok({ type: 'turn.steers-out', turnId: t.id, through: cmd.through });
     }
     case 'server.steers-taken': {
       const t = s.turns[cmd.turnId];
