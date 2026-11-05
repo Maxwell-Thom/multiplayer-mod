@@ -232,7 +232,8 @@ export const register: Register = (on, options) => {
   on('prompt.submit', async ($, e, next) => {
     // (Only a prompt that says it's the person's own Enter: one that doesn't say, or a plugin's, is the model's.)
     // (Nor one with images: they can't go to the space this way.)
-    if (child || e.command || e.isMeta || e.origin?.kind !== 'composer' || (e.attachments?.length ?? 0) > 0 || !rt.followConv()) return next(e)
+    // (Nor Claude Code's own ! shell command or # memory line: those are this Claude Code's.)
+    if (child || e.command || e.isMeta || e.origin?.kind !== 'composer' || (e.attachments?.length ?? 0) > 0 || /^\s*[!#]/.test(e.text) || !rt.followConv()) return next(e)
     const said = await rt.typed(e.text, e.wait)
     if (said === null) return next(e)
     // Gone to the space: the box empties, as a sent prompt's does. (Claude Code puts a dropped
