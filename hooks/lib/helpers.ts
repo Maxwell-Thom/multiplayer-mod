@@ -34,15 +34,18 @@ export function openAsks(s: SpaceState, turnId: Id): Ask[] {
  * pushed, from each turn's work report (minus work that has since moved to another Claude Code).
  */
 export function leftBehind(s: SpaceState, branchId: Id, runnerId: MemberId): { files: number; commits: number } {
-  let files = 0;
-  let commits = 0;
+  // A file several turns changed is one file; files past a turn's list are counted as they come.
+  const named = new Set<string>();
+  const shas = new Set<string>();
+  let more = 0;
   for (const t of Object.values(s.turns)) {
     const w = t.work;
     if (t.branchId !== branchId || !w || workWhere(t) !== runnerId) continue;
-    files += (w.uncommitted?.length ?? 0) + (w.more ?? 0);
-    if (!w.pushed) commits += w.commits?.length ?? 0;
+    for (const f of w.uncommitted ?? []) named.add(f);
+    more += w.more ?? 0;
+    if (!w.pushed) for (const c of w.commits ?? []) shas.add(c.sha);
   }
-  return { files, commits };
+  return { files: named.size + more, commits: shas.size };
 }
 
 /** Whose computer a turn's changes are on: where a move last took them, else where it ran. */
