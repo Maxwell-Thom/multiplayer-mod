@@ -65,6 +65,8 @@ export const register: Register = (on, options) => {
   let sharedUrl = ''
   /** In a shared turn's session: where to take what people added while Claude works. */
   let steerUrl = ''
+  /** The last steer this turn's session read (each child process runs one turn). */
+  let steersSeen = 0
 
   on('tool.check', async ($, e, next) => {
     const r = await next(e)
@@ -96,13 +98,18 @@ export const register: Register = (on, options) => {
   on('tool.call', async ($, e, next) => {
     const r = await next(e)
     if (r.deny !== undefined || !child || !steerUrl || e.agentId) return r
-    const got = await withTimeout($, $.http.fetch(steerUrl, { method: 'POST' }), 2000).catch(() => null)
-    let steers: { by: string; text: string }[] = []
+    // It says the last one it read, so the server marks only what really arrived.
+    const got = await withTimeout($, $.http.fetch(steerUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ seen: steersSeen }) }), 2000).catch(() => null)
+    let steers: { n: number; by: string; text: string }[] = []
     try {
       const b = got && got.ok ? (JSON.parse(got.text) as { steers?: unknown }) : null
-      if (Array.isArray(b?.steers)) steers = (b.steers as { by?: unknown; text?: unknown }[]).filter((x): x is { by: string; text: string } => typeof x?.by === 'string' && typeof x?.text === 'string' && !!x.text.trim())
+      if (Array.isArray(b?.steers)) steers = (b.steers as { n?: unknown; by?: unknown; text?: unknown }[]).filter((x): x is { n: number; by: string; text: string } => typeof x?.n === 'number' && x.n > steersSeen && typeof x?.by === 'string' && typeof x?.text === 'string' && !!x.text.trim())
     } catch { steers = [] }
     if (!steers.length) return r
+    steersSeen = Math.max(steersSeen, ...steers.map((x) => x.n))
+    // Here now: said at once, so one read at the turn's last tool call is marked read too (what this
+    // answer brings back is left for the next check). A lost word costs a repeat, never a steer.
+    await withTimeout($, $.http.fetch(steerUrl, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ seen: steersSeen }) }), 1500).catch(() => null)
     return { ...r, context: [...(r.context ?? []), ...steers.map((x) => `${x.by} adds, while you work:\n\n${x.text}`)] }
   })
 

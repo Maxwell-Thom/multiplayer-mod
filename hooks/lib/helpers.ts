@@ -302,10 +302,11 @@ export function creditsRefusalFor(s: SpaceState, model: string, runnerId: Member
   if (!usesCredits({ name: model })) return null;
   const allows = s.members[runnerId]?.prefs?.credits ?? 'mine';
   const what = /fable/i.test(model) ? 'Fable' : modelLabel(model);
-  if (runnerId === senderId) return allows === 'off' ? `${what} may bill your usage credits, and you’ve turned that off in Where it runs.` : null;
+  // Each says why, and what to do about it.
+  if (runnerId === senderId) return allows === 'off' ? `${what} may bill your usage credits, and you’ve turned that off in Where it runs. Turn it on there, or pick another model.` : null;
   if (allows === 'everyone') return null;
   const name = memberName(s, runnerId);
-  return allows === 'off' ? `${what} may bill ${name}’s usage credits, and ${name} has turned that off.` : `${what} may bill ${name}’s usage credits. ${name} allows that for their own turns only.`;
+  return allows === 'off' ? `${what} may bill ${name}’s usage credits, and ${name} has turned that off. Pick another model.` : `${what} may bill ${name}’s usage credits. ${name} allows that for their own turns only: ask them to allow everyone’s turns in Where it runs, or pick another model.`;
 }
 
 /** The same, for `senderId`'s next turn on a branch, where it would run now (for a warning before sending). */

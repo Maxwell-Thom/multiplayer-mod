@@ -376,6 +376,10 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       out.push(ev(ctx, id, branch.private ? 'lock' : 'branch', branch.private ? 'Your private lane, from the latest turn' : `Branched from ${parent.name}${at ? ` at ${at}` : ''}${cmd.editOf ? ', with an edit' : ''}`));
       if (cmd.inMine && !branch.private) out.push(ev(ctx, id, 'laptop', `This branch runs in ${memberName(s, actor)}’s Claude Code`));
       const original = cmd.editOf ? s.turns[cmd.editOf] : undefined;
+      // An edit becomes a prompt as typing it would: the same commands are refused.
+      for (const text of [cmd.editText ?? '', ...(Array.isArray(cmd.editParts) ? cmd.editParts.map((p) => p?.text ?? '') : [])]) {
+        const refused = typeof text === 'string' ? slashRefusal(text) : null; if (refused) return fail(refused);
+      }
       if (cmd.editParts && original) {
         // A reveal's positions are shown without names: an edit must not put them back.
         if (original.mode === 'reveal') return fail('Opinions shown after Claude’s answer can’t be edited.');
@@ -523,8 +527,12 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (cmd.mode === 'context') {
         const text = (cmd.text ?? '').trim();
         if (!/^\/context(\s|$)/.test(text)) return fail('Send /context on its own.');
+        // The session it reports on is the one the conversation runs in: only there, and only its person's.
+        if (!b.runnerId) return fail('/context shows this conversation’s session, and nothing has run here yet.');
+        if (b.runnerId !== actor) return fail(`/context shows the session of the Claude Code this conversation runs in, and that’s ${memberName(s, b.runnerId)}’s.`);
         if (Object.values(s.turns).some((x) => x.mode === 'context' && x.senderId === actor && isActive(x))) return fail('Your /context is on its way.');
-        const turn = turnFrom(ctx, s, b, [{ memberId: actor as MemberId, text }], { mode: 'context', private: true, checked: true });
+        const credits = creditsRefusalFor(s, b.model.name, actor as MemberId, actor as MemberId); if (credits) return fail(credits, 'credits');
+        const turn = turnFrom(ctx, s, b, [{ memberId: actor as MemberId, text }], { mode: 'context', private: true, checked: true, runnerId: actor as MemberId });
         return ok({ type: 'turn.requested', turn, consumed: [] });
       }
       const busy = activeTurn(s, b.id);
@@ -970,6 +978,8 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const text = cmd.text.trim();
       if (!text) return fail('Say what to ask.');
       if (Object.values(s.turns).some((x) => x.mode === 'aside' && x.senderId === actor && isActive(x))) return fail('Your side question is on its way.');
+      // It runs in its asker's own Claude Code, on the branch's model: their yes to usage credits.
+      { const credits = creditsRefusalFor(s, b.model.name, actor as MemberId, actor as MemberId); if (credits) return fail(credits, 'credits'); }
       const turn = turnFrom(ctx, s, b, [{ memberId: actor as MemberId, text }], { mode: 'aside', private: true, checked: true });
       return ok({ type: 'turn.requested', turn, consumed: [] });
     }

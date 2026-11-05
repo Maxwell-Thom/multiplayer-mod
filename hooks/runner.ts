@@ -59,7 +59,8 @@ const STORE_ACCOUNTS = 'accounts'
 /** Which of Claude Code's model families this person's plan runs, checked at most once a day. */
 const STORE_MODELS = 'models'
 const MODELS_FOR_MS = 24 * 60 * 60 * 1000
-const MODEL_FAMILIES = ['fable', 'opus', 'sonnet', 'haiku']
+// Not Fable: even a one-token check of it may bill usage credits, and nobody said yes to that here.
+const MODEL_FAMILIES = ['opus', 'sonnet', 'haiku']
 /** Claude Code sessions brought into spaces: session id → where they went (newest last). */
 const STORE_BROUGHT = 'brought'
 type Brought = { sessionId: string; spaceId: string; conversationId: string; at: number }
@@ -1403,7 +1404,9 @@ export class Runner {
         if (n.value.stream === 'stderr') { errText = (errText + n.value.text).slice(-4000); continue }
         for (const ev of reader.push(n.value.text)) {
           if (ev.kind === 'init') { if (ev.sessionId) sessionId = ev.sessionId; if (ev.model) a.model = ev.model; if (ev.commands) this.noteCommands(ev.commands) }
-          else if (ev.kind === 'notice') { if (a.notices && a.notices.length < 5 && !a.notices.includes(ev.text)) a.notices.push(ev.text) }
+          // Only what the space needs to know (fast mode, usage credits, Auto): any other notice could name
+          // something on this computer (a plugin's path, a settings file), so it stays here.
+          else if (ev.kind === 'notice') { if (a.notices && a.notices.length < 5 && !a.notices.includes(ev.text) && /fast mode|usage credit|auto mode/i.test(ev.text)) a.notices.push(ev.text) }
           else if (ev.kind === 'text') { a.live = ev.text; this.scheduleDelta(a) }
           else if (ev.kind === 'tool') this.beginStep(a, ev.id, ev.name, ev.input, ev.parent)
           else if (ev.kind === 'tool-result') this.endStep(a, ev.id, ev.isError ? (isRefusal(ev.text) ? 'denied' : 'fail') : 'done')

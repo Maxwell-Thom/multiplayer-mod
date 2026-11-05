@@ -466,7 +466,12 @@ export function buildSessionTurn(s: SpaceState, turn: Turn, opts: SessionTurnOpt
   }
   // What people added to this session's last turn after Claude had finished reading (no tool call
   // came after it): it comes now, said as what it was.
-  const last = opts.heldThrough ? s.turns[opts.heldThrough] : undefined;
+  // (Past a /compact, which nobody adds to: the turn before it.)
+  let last = opts.heldThrough ? s.turns[opts.heldThrough] : undefined;
+  if (last?.mode === 'compact') {
+    const before = historyTurns(s, last.branchId).filter((t) => t.mode !== 'compact' && t.requestedAt < last!.requestedAt && t.runnerId === turn.runnerId);
+    last = before[before.length - 1];
+  }
   if (last && last.runnerId === turn.runnerId && last.branchId === turn.branchId) {
     for (const x of (last.steers ?? []).filter((x) => x.n > (last.steersTaken ?? 0))) notes.push(`${memberName(s, x.by)} added while Claude worked, after it had finished reading:\n\n${x.text}`);
   }
