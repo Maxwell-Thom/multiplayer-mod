@@ -41,6 +41,32 @@ export type MultiplayerView = {
   asks?: { from: string; kind: 'run-here' | 'move' | 'project'; space: string }[]
 }
 
+/** One step of a shared turn, as its mirror row draws it (like Claude Code's own tool rows). */
+export type MultiplayerFeedStep = { tool: string; text: string; state: 'run' | 'done' | 'fail' | 'wait' | 'denied'; under: boolean }
+
+/** What one shared turn's row in this Claude Code's transcript draws (the Multiplayer mirror; display only). */
+export type MultiplayerFeed = {
+  id: string
+  /** The conversation, and the branch when it isn't main. */
+  where: string
+  /** Who wrote what ("You" for this person). */
+  parts: { who: string; text: string }[]
+  /** "your Claude Code" or "Kim's Claude Code". */
+  runner: string
+  status: 'waiting' | 'held' | 'running' | 'approval' | 'paused' | 'done' | 'stopped' | 'failed'
+  /** One line on where it stands: what it waits for, or how it ended. */
+  line: string
+  /** Its latest steps, and how many came before them. */
+  steps: MultiplayerFeedStep[]
+  more: number
+  /** The answer so far. */
+  text: string
+  /** What people added while Claude worked: queued until read. */
+  queued: { who: string; text: string; state: 'queued' | 'read' }[]
+  /** An approval this Claude Code waits on for it (only this runner's own). */
+  approval: { requestId: string; title: string; always?: string } | null
+}
+
 /** What survives a hot reload of the module while a shared turn runs. */
 export type MultiplayerMemo = {
   /** The runner session id sent with hello and every poll. */
@@ -51,6 +77,6 @@ export type MultiplayerMemo = {
 
 declare module 'claude-code' {
   interface PluginState {
-    multiplayer: { view: MultiplayerView; memo: MultiplayerMemo }
+    multiplayer: { view: MultiplayerView; memo: MultiplayerMemo; feed: StateFamily<MultiplayerFeed> }
   }
 }

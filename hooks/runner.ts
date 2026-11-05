@@ -12,7 +12,8 @@
 //   endpoint (the web app, or /multiplayer allow here).
 import type { SessionRateLimit, TurnCompleteInput } from 'claude-code'
 
-import type { MultiplayerMemo, MultiplayerView } from '../types'
+import type { MultiplayerFeed, MultiplayerMemo, MultiplayerView } from '../types'
+import { feedOf, feedRowId, feedTurns } from './feed.ts'
 import { StreamReader, childArgs, isClaudeProgram, isRefusal, keptUserSettings, newSessionId, turnSettings, type ResultUsage, type RunEvent, type SessionPlan } from './child.ts'
 import {
   HttpError, Wire, createSpace, health, joinSpace, logoutAccount, normalizeServer, pollDevice, redeemPair, startDevice, webLink,
@@ -312,6 +313,11 @@ export class Runner {
   private peopleAt = 0
   private lastStatus: string | undefined = undefined
   private lastView = ''
+  /** The mirror: turns from this sign-in on get rows (and those still going then); what each row last drew; others' live text. */
+  private feedSince = 0
+  private feedDrawn = new Map<string, string>()
+  private feedPlaced = new Set<string>()
+  private othersLive = new Map<string, string>()
   /** This Claude Code's sign-in to its person's account on the configured server, when it has one. */
   account: StoredAccount | null = null
   /** /multiplayer login waiting for its person to approve it in the web app. */
@@ -810,6 +816,9 @@ export class Runner {
       else if (m.kind === 'transfer.send') void this.sendWork(m)
       else if (m.kind === 'transfer.receive') void this.receiveWork(m)
       else if (m.kind === 'pause' || m.kind === 'resume') void this.setPaused(m.kind === 'pause')
+      else if (m.kind === 'delta') this.othersLive.set(m.turnId, m.text)
+      else if (m.kind === 'presence') this.presence = [...this.presence.filter((p) => p.memberId !== m.presence.memberId), m.presence]
+      else if (m.kind === 'presence.gone') this.presence = this.presence.filter((p) => p.memberId !== m.memberId)
     }
   }
 
@@ -1559,6 +1568,7 @@ export class Runner {
       if (this.active !== a || a.stopped || !a.live) return
       a.lastDelta = Date.now()
       void (a.wire ?? this.wire)?.live({ kind: 'delta', turnId: a.turnId, text: a.live })
+      this.refreshFeed()
     }
     const wait = 250 - (Date.now() - a.lastDelta)
     if (wait <= 0) send()
@@ -2891,9 +2901,47 @@ export class Runner {
     }
   }
 
+  /**
+   * The mirror: each shared turn this person can see, from this sign-in on (and any still going
+   * then), as a row in this Claude Code's transcript, drawn from its feed. Display only: the model
+   * never reads it. A row is placed once and redrawn as its feed changes.
+   */
+  refreshFeed(): void {
+    try { this.refreshFeedNow() } catch (err) { this.io?.log(`multiplayer: the mirror couldn’t draw: ${(err as Error).message}`, true) }
+  }
+
+  private refreshFeedNow(): void {
+    const s = this.state
+    if (!this.io || !s || !this.session || !this.io.setFeed || !this.io.place) return
+    if (!this.feedSince) this.feedSince = Date.now()
+    const a = this.active
+    const going = new Set(['requested', 'held', 'conflict', 'running', 'approval', 'paused'])
+    const turns = Object.values(s.turns).filter((t) => t.requestedAt >= this.feedSince || this.feedPlaced.has(t.id) || going.has(t.status))
+    for (const t of feedTurns({ ...s, turns: Object.fromEntries(turns.map((x) => [x.id, x])) }, 0)) {
+      const mine = a && a.turnId === t.id ? a : null
+      const pending = mine ? [...mine.approvals.values()][0] : undefined
+      const feed: MultiplayerFeed = feedOf(s, t, this.me, {
+        now: Date.now(),
+        live: mine ? mine.live : this.othersLive.get(t.id),
+        approval: pending ? { requestId: pending.requestId, title: pending.title, ...(pending.always ? { always: pending.always } : {}) } : null,
+      })
+      const json = JSON.stringify(feed)
+      if (this.feedDrawn.get(t.id) !== json) {
+        this.feedDrawn.set(t.id, json)
+        void soft(() => this.io.setFeed!(t.id, feed))
+      }
+      if (!this.feedPlaced.has(t.id)) {
+        this.feedPlaced.add(t.id)
+        void Promise.resolve().then(() => this.io.place!(feedRowId(t.id))).catch((err: Error) => this.io.log(`multiplayer: couldn’t place its row: ${err.message}`, true))
+      }
+      if (!going.has(t.status)) this.othersLive.delete(t.id)
+    }
+  }
+
   /** Redraws the status line and the pane's values when they changed. */
   refresh(): void {
     if (!this.io) return
+    this.refreshFeed()
     const ses = this.session
     // Claude Code draws a plugin's status line as a warning, after the plugin's name. So it's kept
     // for what needs the person; the steady state is a dim label in the prompt footer (register.tsx).

@@ -9,7 +9,7 @@ import type {
   ProcessRunResult, ProcessSpawnChunk, ProcessSpawnResult, PromptSubmitResult, SessionUsage, Timer,
 } from 'claude-code'
 
-import type { MultiplayerMemo, MultiplayerView } from '../types'
+import type { MultiplayerMemo, MultiplayerFeed, MultiplayerView } from '../types'
 
 export type Fetch = (url: string, init: HttpInit) => Promise<HttpResponse>
 
@@ -34,6 +34,9 @@ export type Port = {
   getMemo: () => Promise<MultiplayerMemo | undefined>
   setMemo: (memo: MultiplayerMemo) => Promise<unknown>
   setView: (view: MultiplayerView) => Promise<unknown>
+  /** A shared turn's mirror row: its feed (drawn by the Placed hook), and placing the row once. */
+  setFeed?: (turnId: string, feed: MultiplayerFeed) => Promise<unknown>
+  place?: (id: string) => Promise<unknown>
   // time
   sleep: (ms: number) => Promise<void>
   after: (ms: number, fn: () => void) => Timer

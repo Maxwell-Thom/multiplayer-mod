@@ -4,7 +4,7 @@
 import { atom, read } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import type { MultiplayerView } from '../types'
+import type { MultiplayerFeed, MultiplayerView } from '../types'
 import type { Port } from './port.ts'
 import { privateSource } from './lib/privacy.ts'
 import { EMPTY_VIEW, PANE, Runner } from './runner.ts'
@@ -136,6 +136,8 @@ export const register: Register = (on, options) => {
       getMemo: async () => (await $.state.get(MEMO)).value,
       setMemo: (memo) => $.state.set(MEMO, memo),
       setView: (v) => $.state.set(VIEW, v),
+      setFeed: (turnId, feed) => $.state.set({ plugin: 'multiplayer', key: 'feed', id: turnId }, feed),
+      place: (id) => $.ui.place({ id }),
       sleep: (ms) => $.clock.sleep(ms),
       after: (ms, fn) => $.clock.after(ms, fn),
       model: () => $.session.model(),
@@ -248,6 +250,54 @@ export const register: Register = (on, options) => {
     if (!v.isSignedIn || v.needsYou) return next(e)
     const label = `multiplayer: ${v.space || 'space'}${v.status === 'connected' ? '' : ` · ${v.status}`}`
     return next({ ...e, props: { ...e.props, modes: [...e.props.modes, label] } })
+  })
+
+  // ------------------------------------------------------------------ mirror
+
+  // Each shared turn as a row in this transcript, drawn like Claude Code's own rows: who wrote
+  // what, its steps, the answer as it comes, what people added while Claude worked, an approval
+  // waiting here, and one line on where it stands. Display only: the model never reads it.
+  on('ui.render', { component: 'Placed' }, async ($, e, next) => {
+    if (child || e.props.plugin !== 'multiplayer' || !e.props.id.startsWith('turn-')) return next(e)
+    const { value } = await $.state.get({ plugin: 'multiplayer', key: 'feed', id: e.props.id.slice(5) })
+    const f = value as MultiplayerFeed | undefined
+    if (!f) return next(e)
+    const { Box, Text, Markdown, Button } = $.ui.resolve(e)
+    const going = f.status === 'running' || f.status === 'approval' || f.status === 'waiting' || f.status === 'held' || f.status === 'paused'
+    const dot = (state: string) => (state === 'fail' ? 'error' : state === 'wait' ? 'warning' : state === 'run' ? 'claude' : undefined)
+    const answer = async (decision: 'allow-once' | 'allow-always' | 'deny') => {
+      const said = await rt.answerLocally(decision)
+      $.ui.toast(`Multiplayer: ${said}`)
+    }
+    return (
+      <Box flexDirection="column">
+        <Text dimColor>{`multiplayer · ${f.where}`}</Text>
+        {f.parts.map((x) => (
+          <Text><Text bold>{`> ${x.who}: `}</Text>{x.text}</Text>
+        ))}
+        {f.more ? <Text dimColor>{`  … ${f.more} earlier step${f.more === 1 ? '' : 's'}`}</Text> : null}
+        {f.steps.map((st) => (
+          <Text dimColor={st.state === 'done'}>
+            {st.under ? '    ⎿ ' : ''}<Text color={dot(st.state)}>⏺</Text>{` ${st.tool} ${st.text}${st.state === 'denied' ? ' (denied)' : st.state === 'fail' ? ' (failed)' : ''}`}
+          </Text>
+        ))}
+        {f.text ? <Markdown text={f.text} /> : null}
+        {f.queued.map((q) => (
+          <Text dimColor={q.state === 'queued'}><Text bold>{`> ${q.who}: `}</Text>{q.text}{q.state === 'queued' ? '  (queued)' : '  (read while Claude worked)'}</Text>
+        ))}
+        {f.approval ? (
+          <Box flexDirection="column">
+            <Text color="permission">{`Claude wants to: ${f.approval.title}`}</Text>
+            <Box>
+              <Button key={`yes:${f.id}`} hotkey="1" variant="primary" label="Yes" onPress={() => void answer('allow-once')} />
+              {f.approval.always ? <Button key={`always:${f.id}`} hotkey="2" label={`Yes, ${f.approval.always.toLowerCase()}`} onPress={() => void answer('allow-always')} /> : null}
+              <Button key={`no:${f.id}`} hotkey="3" label="No" onPress={() => void answer('deny')} />
+            </Box>
+          </Box>
+        ) : null}
+        <Text dimColor color={f.status === 'failed' ? 'error' : going ? 'claude' : undefined}>{`${going ? '✻' : '⎿'} ${f.line}`}</Text>
+      </Box>
+    )
   })
 
   // -------------------------------------------------------------------- pane
