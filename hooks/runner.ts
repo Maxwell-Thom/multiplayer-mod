@@ -1308,8 +1308,9 @@ export class Runner {
     const folder = await this.folderView(s, t.branchId, a.work0 === null)
 
     // A recap is a one-off private session. A side question (Claude Code's /btw, for a branch) runs
-    // in a throwaway fork of the asker's session of the branch: the same instructions and tools, so it
-    // reads the branch from the prompt cache. Neither is kept.
+    // in a throwaway fork of the asker's session of the branch, when they have one (its runner does):
+    // the same instructions and tools, so it reads the branch from the prompt cache. Anyone else's
+    // starts a new session that reads the branch once. Neither is kept.
     const oneOff = isOneOff(t)
     // /context reports on the asker's own session of the branch, as a side question does: on a fork.
     const aside = t.mode === 'aside' || t.mode === 'context'

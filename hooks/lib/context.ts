@@ -365,7 +365,7 @@ export function sessionSystem(s: SpaceState, turn: Turn): string {
   return [
     `This session is a shared conversation in Multiplayer, ${where}. Several people write each turn together, and each part is labelled with who wrote it; treat everyone's parts equally, and call people by their names (not he or she: a name doesn't tell you).`,
     `It runs on ${runner}'s machine and plan, but everyone in the space reads your answers. Keep ${runner}'s personal memory, notes, credentials and unrelated files out of it unless they're asked for in the turn.`,
-    `It works in ${runner}'s own folder. Everyone else's turns run in their own copies, so a change from someone else's turn is here only once it's pushed and pulled; "Where the code is" notes say which changes this folder has.`,
+    `It works in ${runner}'s own folder, and this conversation's turns run here, whoever sends them. A turn that ran in another Claude Code (before the conversation moved here) left its changes there unless they came with the move or were pushed and pulled; "Where the code is" notes say which changes this folder has.`,
     `Turns this session didn't run itself (other people's, or ones stopped or cut short) reach you as "[Multiplayer]" notes before the prompt, word for word.`,
     `When the group settles something, record it with the propose_decision tool; when something stays open, use add_question. Don't record things nobody has agreed on.`,
   ].join('\n');
