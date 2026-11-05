@@ -105,6 +105,11 @@ const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u001f\u007f\u2028\u2029]/;
 
+/** Whether text has a control character or line break (what one line, such as a command, mustn't). */
+export function hasControl(text: string): boolean {
+  return CONTROL.test(text);
+}
+
 function checkField(v: unknown, spec: string): boolean {
   const optional = spec.endsWith('?');
   const s = optional ? spec.slice(0, -1) : spec;

@@ -218,7 +218,8 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'turn.started': {
       const t = s.turns[e.turnId];
       if (!t) return s;
-      s = patchTurn(s, e.turnId, { status: 'running', runnerId: e.runnerId, startedAt: e.at, model: e.model ?? t.model, pausedAt: undefined });
+      const asked = s.branches[t.branchId]?.model.effort;
+      s = patchTurn(s, e.turnId, { status: 'running', runnerId: e.runnerId, startedAt: e.at, model: e.model ?? t.model, pausedAt: undefined, ...(asked ? { effortAsked: asked } : {}) });
       if (t.mode !== 'recap' && t.mode !== 'aside' && t.mode !== 'context') s.leases = { ...s.leases, [t.branchId]: { branchId: t.branchId, holderId: e.runnerId, turnId: t.id, heartbeatAt: e.at } };
       return s;
     }

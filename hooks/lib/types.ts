@@ -286,6 +286,8 @@ export interface Turn {
   model?: string;
   /** The effort level that ran (it can differ from the pin: a model's levels, a runner's cap). */
   effort?: string;
+  /** The effort its branch was pinned to as it started ('auto' for the model's own), to say the level against. */
+  effortAsked?: Effort;
   /** Whether it ran in fast mode: false when the pin asked for it and it ran at standard speed. */
   fast?: boolean;
   /** What Claude Code said about the session as it ran (fast mode turned off, and the like). */

@@ -7,7 +7,7 @@ import {
 } from './helpers.ts';
 import type { Branch, Decision, MergeItem, ModelPin, Part, Policy, Schedule, SharedFile, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
 import { DEFAULT_POLICY, FILE_MAX_BYTES, PART_FILES_MAX, SCHEDULE_MAX_MS, SCHEDULE_MIN_MS, SCHEDULES_PER_MEMBER } from './types.ts';
-import { invalid } from './validate.ts';
+import { hasControl, invalid } from './validate.ts';
 
 /** Turns a conversation brought in may have in all. */
 export const IMPORT_MAX = 2000;
@@ -524,6 +524,8 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
       if (b.state === 'merged') return fail('That branch was merged.');
       // /context: what this person's own session of the branch holds, to them alone (as a side question).
+      // A command is one line, as Claude Code's prompt takes it.
+      if ((cmd.mode === 'context' || cmd.mode === 'compact') && hasControl(cmd.text ?? '')) return fail('Send the command on one line.');
       if (cmd.mode === 'context') {
         const text = (cmd.text ?? '').trim();
         if (!/^\/context(\s|$)/.test(text)) return fail('Send /context on its own.');

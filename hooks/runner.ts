@@ -1367,8 +1367,8 @@ export class Runner {
       fallback,
       // Someone else's turn spends at most what this person allows (none on their own).
       budgetUsd: t.senderId !== this.me ? s.members[this.me]?.prefs?.budget : undefined,
-      // A guess at the next prompt, unless this person turned Claude Code's off (not for one-offs).
-      suggestions: !oneOff && settings?.promptSuggestionEnabled !== false,
+      // A guess at the next prompt, unless this person turned Claude Code's off (not for one-offs or /compact).
+      suggestions: !oneOff && t.mode !== 'compact' && settings?.promptSuggestionEnabled !== false,
     })]
     const env: Record<string, string> = {
       MULTIPLAYER_CHILD: personal ? 'private' : 'shared',
