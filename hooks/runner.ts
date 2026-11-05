@@ -1002,6 +1002,17 @@ export class Runner {
     return Array.isArray(list) ? (list as WorkEntry[]) : []
   }
 
+  /** Turns this person's Claude Code ran in its other folders: their files are there, not here. */
+  private async turnsInOtherFolders(): Promise<Set<string>> {
+    const all = await soft(() => this.io.storeGet(STORE_WORK))
+    const out = new Set<string>()
+    if (!all || typeof all !== 'object') return out
+    for (const [k, list] of Object.entries(all as Record<string, unknown>)) {
+      if (k !== this.folderKey() && Array.isArray(list)) for (const e of list as WorkEntry[]) if (typeof e?.turnId === 'string') out.add(e.turnId)
+    }
+    return out
+  }
+
   private async saveWork(list: WorkEntry[]): Promise<void> {
     const all = ((await soft(() => this.io.storeGet(STORE_WORK))) ?? {}) as Record<string, WorkEntry[]>
     const key = this.folderKey()
@@ -1602,8 +1613,9 @@ export class Runner {
       if (t.branchId === branchId) for (const f of e.files) out.add(f)
       else if (runsHere(t.branchId)) for (const f of e.files) others.add(f)
     }
+    const elsewhere = await this.turnsInOtherFolders()
     for (const t of Object.values(s?.turns ?? {})) {
-      if (!t.work?.uncommitted?.length || !(moved || workWhere(t) === this.me)) continue
+      if (!t.work?.uncommitted?.length || !(moved || workWhere(t) === this.me) || elsewhere.has(t.id)) continue
       // Without git, another Claude Code's turn names its files as they were there; here a copy
       // may sit beside a file of this person's own by that name. What holds them here arrived.
       if (t.work.noRepo && t.runnerId !== this.me) continue
