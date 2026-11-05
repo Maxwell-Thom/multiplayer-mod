@@ -7,7 +7,8 @@ import type {
 import type { Fetch } from './port.ts'
 
 /** A session this Claude Code is signed in with: the wire's Session plus where (`web`: the web app, when it lives apart from the server). */
-export type StoredSession = Session & { server: string; spaceName?: string; web?: string }
+/** `folder`: where it was connected (folderKeyOf): a Claude Code signs in to it there, or in a folder inside it. */
+export type StoredSession = Session & { server: string; spaceName?: string; web?: string; folder?: string }
 
 /** This Claude Code's sign-in to a person's account on a server (from /multiplayer login). */
 export type StoredAccount = { server: string; token: string; email?: string }

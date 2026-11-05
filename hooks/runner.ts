@@ -413,15 +413,51 @@ export class Runner {
     }
   }
 
+  /**
+   * The space this Claude Code signs in to: the one connected in this folder (or a folder it's
+   * inside), else one whose turns ran in this folder before (a sign-in kept by an older mod has no
+   * folder). A Claude Code opened anywhere else stays out of every space, and takes nobody's turns
+   * over. (Maxwell: "are multiplayer sessions not linked to a single session?")
+   */
   private async loadSession(): Promise<StoredSession | null> {
     const list = (await soft(() => this.io.storeGet(STORE_SESSIONS))) as StoredSession[] | undefined
     const activeId = await soft(() => this.io.storeGet(STORE_ACTIVE))
     if (!Array.isArray(list) || !list.length) return null
-    return list.find((s) => s.spaceId === activeId) ?? null
+    const here = this.folderKey()
+    const inside = (folder: string) => here === folder || here.startsWith(`${folder}/`)
+    const connected = list.filter((s) => typeof s.folder === 'string' && inside(s.folder))
+    if (connected.length) return connected.find((s) => s.spaceId === activeId) ?? connected[0]
+    const ran = Object.keys(((await soft(() => this.io.storeGet(STORE_BRANCHES_BY_FOLDER))) as Record<string, Record<string, unknown>> | undefined)?.[here] ?? {})
+    const used = list.filter((s) => ran.some((k) => k.startsWith(`${s.spaceId}:`)))
+    return used.find((s) => s.spaceId === activeId) ?? used[0] ?? null
   }
 
-  private async saveSession(s: StoredSession): Promise<void> {
+  /** Spaces this Claude Code is signed in to in other folders: for saying where, here. */
+  private async elsewhere(): Promise<StoredSession[]> {
+    const list = (await soft(() => this.io.storeGet(STORE_SESSIONS))) as StoredSession[] | undefined
+    return Array.isArray(list) ? list.filter((s) => s.spaceId !== this.session?.spaceId) : []
+  }
+
+  /** `/multiplayer here [space]`: run that space's turns in this folder from now on (the last one connected, by default). */
+  private async cmdHere(name: string): Promise<string> {
+    const list = (await this.elsewhere()).concat(this.session ? [this.session] : [])
+    const want = name.trim().toLowerCase()
+    const pick = want ? list.find((s) => (s.spaceName ?? '').toLowerCase().startsWith(want)) : (await this.elsewhere())[0] ?? this.session
+    if (!pick) return `No space to bring here.${want ? ` None is called “${name.trim()}”.` : ''} /multiplayer join <code>, or /multiplayer connect <pairing code> from the web app.`
+    const title = pick.spaceName ?? 'Your space'
+    if (this.session?.spaceId === pick.spaceId && this.wire) {
+      await this.saveSession({ ...pick, folder: this.folderKey() })
+      return `“${title}” runs in this folder now.`
+    }
+    await this.signedIn(normalizeServer(pick.server), { spaceId: pick.spaceId, memberId: pick.memberId, token: pick.token, code: pick.code, name: pick.name, folder: this.folderKey() })
+    return `“${title}” runs in this folder now: its turns run in this Claude Code.`
+  }
+
+  private async saveSession(s0: StoredSession): Promise<void> {
     const list = ((await soft(() => this.io.storeGet(STORE_SESSIONS))) as StoredSession[] | undefined) ?? []
+    // Connected here: this folder's (a sign-in kept before, the folder it had).
+    const kept = (Array.isArray(list) ? list : []).find((x) => x.spaceId === s0.spaceId && x.server === s0.server)
+    const s: StoredSession = { ...s0, folder: s0.folder ?? kept?.folder ?? this.folderKey() }
     const next = [s, ...(Array.isArray(list) ? list : []).filter((x) => !(x.spaceId === s.spaceId && x.server === s.server))].slice(0, 20)
     await this.io.storeSet(STORE_SESSIONS, next)
     await this.io.storeSet(STORE_ACTIVE, s.spaceId)
@@ -2153,14 +2189,14 @@ export class Runner {
         case '': case 'pane': case 'show':
           if (this.session) await this.refreshPeople(true)
           else await soft(() => this.serverInfo(normalizeServer(this.opts.server)))
-          return { text: this.session ? this.statusText() : this.helpText(), openPane: true }
+          return { text: this.session ? this.statusText() : await this.notHereText(), openPane: true }
         case 'start': case 'new': return { text: await this.cmdStart(rest) }
         case 'join': return { text: await this.cmdJoin(rest) }
         case 'connect': case 'pair': return { text: await this.cmdConnect(rest) }
         case 'status': {
           if (this.wire) await soft(() => this.resync())
           this.refresh()
-          return { text: this.statusText() }
+          return { text: this.session ? this.statusText() : await this.notHereText() }
         }
         case 'open': case 'link': {
           if (!this.session) return { text: 'Not signed in to a space. ' + this.helpText() }
@@ -2220,6 +2256,7 @@ export class Runner {
         }
         case 'take-home': case 'takehome': return { text: await this.cmdTakeHome() }
         case 'follow': return { text: await this.cmdFollow(rest.join(' ')) }
+        case 'here': return { text: await this.cmdHere(rest.join(' ')) }
         case 'share': return { text: this.cmdShare(rest.join(' ')) }
         case 'post': return { text: await this.cmdPost(rest.join(' ')) }
         case 'login': case 'sign-in': case 'signin': return { text: await this.cmdLogin() }
@@ -2300,6 +2337,14 @@ export class Runner {
     await soft(() => w.bye())
   }
 
+  /** Not in a space in this folder: where this person's spaces are, and how to bring one here. */
+  private async notHereText(): Promise<string> {
+    const others = await this.elsewhere()
+    if (!others.length) return this.helpText()
+    const where = others.slice(0, 3).map((s) => `“${s.spaceName ?? 'a space'}”${s.folder ? ` (in ${s.folder})` : ''}`).join(', ')
+    return `This Claude Code isn’t in a space in this folder, so it runs no shared turns here. Yours: ${where}. /multiplayer here brings ${others.length === 1 ? 'it' : 'one (/multiplayer here <name>)'} to this folder.`
+  }
+
   private helpText(): string {
     // The web app's help page, once the server has said where the web app is.
     const web = this.servers.get(normalizeServer(this.opts.server))?.webUrl
@@ -2311,6 +2356,8 @@ export class Runner {
       '  /multiplayer login | logout                          sign this Claude Code in to your account (invite-only servers)',
       '  /multiplayer import [session id]                     bring this Claude Code conversation (or another here) into a space',
       '  /multiplayer sharing | unshare <name|all>             what of yours this space may read (your Gmail, files outside the project)',
+      '  /multiplayer here [space]                            run your space’s turns in this folder (a space signs in where it was connected)',
+      '  /multiplayer follow [conversation | off]             what you type here goes to a conversation',
       '  /multiplayer status | open | pause | resume | allow | deny | stop | share <what> | post [text] | take-home | leave',
       '  /multiplayer send-work | keep-work | get-work          a moved conversation’s changes: send yours on, keep them, or ask for them again',
       `Server: ${normalizeServer(this.opts.server)} (change it in /config, Multiplayer › Server URL)${this.account ? ` · signed in${this.account.email ? ` as ${this.account.email}` : ''}` : ''}.`,
@@ -2445,7 +2492,7 @@ export class Runner {
     }
   }
 
-  private async signedIn(server: string, s: { spaceId: string; memberId: string; token: string; code: string; name: string }): Promise<StoredSession> {
+  private async signedIn(server: string, s: { spaceId: string; memberId: string; token: string; code: string; name: string; folder?: string }): Promise<StoredSession> {
     const io = this.io
     // The web app may live apart from the server (GitHub Pages): links go there.
     const web = (await soft(() => this.serverInfo(server)))?.webUrl
