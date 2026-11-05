@@ -13,7 +13,7 @@
 import type { SessionRateLimit, TurnCompleteInput } from 'claude-code'
 
 import type { MultiplayerFeed, MultiplayerMemo, MultiplayerView } from '../types'
-import { feedOf, feedRowId, feedTurns } from './feed.ts'
+import { feedOf, feedRowId, feedTurns, one as oneLine } from './feed.ts'
 import { StreamReader, childArgs, isClaudeProgram, isRefusal, keptUserSettings, newSessionId, turnSettings, type ResultUsage, type RunEvent, type SessionPlan } from './child.ts'
 import {
   HttpError, Wire, createSpace, health, joinSpace, logoutAccount, normalizeServer, pollDevice, redeemPair, startDevice, webLink,
@@ -25,6 +25,7 @@ import * as M from './move.ts'
 import type { Command } from './lib/commands.ts'
 import { type FolderView, buildSessionTurn, parseReplies } from './lib/context.ts'
 import type { FilesAction, FilesReport, LocalAction, LocalReport, LocalSession, SpaceEvent } from './lib/events.ts'
+import { steerRefusal } from './lib/helpers.ts'
 import { type AskQuestion, autoModeOk, clip, creditsRefusalFor, usesCredits, fastOk, fileType, fmtSize, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName, modelLabel, resolveEffort, workWhere } from './lib/helpers.ts'
 import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './transcript.ts'
 import { apply } from './lib/reduce.ts'
@@ -40,6 +41,8 @@ export const PANE = 'multiplayer'
 const STORE_SESSIONS = 'sessions'
 const STORE_ACTIVE = 'activeSpace'
 const STORE_PAUSED = 'paused'
+/** The conversation (its id) typing here goes to, per space: `{ [spaceId]: conversationId }`. */
+const STORE_FOLLOW = 'follow'
 /** Changes a move brought that wait for the Files panel to resolve its conflicts, by folder. */
 const STORE_WAITING = 'movesWaiting'
 /** Branches whose changes left behind here the person chose to keep (/multiplayer keep-work). */
@@ -516,6 +519,7 @@ export class Runner {
     const snap = await soft(() => w.snapshot())
     if (!snap || w !== this.wire) return
     this.presence = snap.presence
+    if (this.followed === null) void this.loadFollow().then(() => this.refresh())
     this.runners = snap.runners
     this.refresh()
   }
@@ -558,6 +562,7 @@ export class Runner {
     this.state = snap.state
     this.me = snap.me
     this.presence = snap.presence
+    if (this.followed === null) void this.loadFollow().then(() => this.refresh())
     this.runners = snap.runners
     this.phase = 'superseded'
     this.refresh()
@@ -611,6 +616,7 @@ export class Runner {
     this.state = snap.state
     this.me = snap.me
     this.presence = snap.presence
+    if (this.followed === null) void this.loadFollow().then(() => this.refresh())
     this.runners = snap.runners
     if (this.session && this.session.spaceName !== snap.state.space.name) {
       this.session = { ...this.session, spaceName: snap.state.space.name }
@@ -2205,6 +2211,7 @@ export class Runner {
           return { text: r.ok ? `Stopping ${a.label}; what Claude wrote so far stays.` : `Couldn’t stop it: ${r.error ?? 'refused'}.` }
         }
         case 'take-home': case 'takehome': return { text: await this.cmdTakeHome() }
+        case 'follow': return { text: await this.cmdFollow(rest.join(' ')) }
         case 'share': return { text: this.cmdShare(rest.join(' ')) }
         case 'post': return { text: await this.cmdPost(rest.join(' ')) }
         case 'login': case 'sign-in': case 'signin': return { text: await this.cmdLogin() }
@@ -2896,7 +2903,11 @@ export class Runner {
       needsYou: this.needsYou(),
       people,
       turns,
-      approval: pending ? { tool: pending.tool, title: pending.title } : null,
+      approval: pending ? { tool: pending.tool, title: pending.title, ...(pending.always ? { always: pending.always } : {}) } : null,
+      now: s ? this.nowLines() : [],
+      writers: s ? this.presence.filter((p) => p.memberId !== this.me && s.members[p.memberId] && !s.members[p.memberId].leftAt && (p.status === 'writing' || !!p.draft)).slice(0, 3)
+        .map((p) => ({ who: memberName(s, p.memberId), ...(p.draft ? { draft: oneLine(p.draft).slice(0, 300) } : {}) })) : [],
+      ...(this.followConv() ? { follow: oneLine(this.followConv()!.title) } : {}),
       asks: s ? this.asksToMe().slice(0, 5).map((x) => ({ from: memberName(s, x.from), kind: x.kind === 'move' ? 'move' as const : x.kind === 'project' ? 'project' as const : 'run-here' as const, space: this.convTitle(x.branchId) })) : [],
     }
   }
@@ -2936,6 +2947,101 @@ export class Runner {
       }
       if (!going.has(t.status)) this.othersLive.delete(t.id)
     }
+  }
+
+  /** What Claude is doing now in the space (this Claude Code's own turn first): one line each, for the band. */
+  private nowLines(): { turnId: string; line: string }[] {
+    const s = this.state
+    if (!s) return []
+    const going = Object.values(s.turns).filter((t) => t.status === 'running' || t.status === 'approval').sort((a, b) => Number(b.runnerId === this.me) - Number(a.runnerId === this.me) || (b.startedAt ?? 0) - (a.startedAt ?? 0))
+    return going.slice(0, 2).map((t) => {
+      const b = s.branches[t.branchId]
+      const conv = (b && s.conversations[b.conversationId]?.title) || 'a conversation'
+      const step = [...(t.steps ?? [])].reverse().find((x) => x.state === 'run' || x.state === 'wait')
+      const where = t.runnerId === this.me ? 'your Claude Code' : `${memberName(s, t.runnerId)}’s Claude Code`
+      return { turnId: t.id, line: oneLine(`Claude is working in ${where} · “${conv}”${step ? ` · ${step.text}` : ''}`) }
+    })
+  }
+
+  // ============================================================ following a conversation
+
+  private followed: string | null = null
+
+  /** The conversation typing here goes to (its main branch's), while following one. */
+  followConv(): { id: string; title: string; mainBranchId: string } | null {
+    const s = this.state
+    const c = this.followed && s ? s.conversations[this.followed] : undefined
+    return c ? { id: c.id, title: c.title, mainBranchId: c.mainBranchId } : null
+  }
+
+  /** `/multiplayer follow [title | off]`: typing here goes to that conversation (by default, the one that runs here most lately). */
+  async cmdFollow(arg: string): Promise<string> {
+    const s = this.state
+    if (!s || !this.session) return 'Not signed in to a space. ' + this.helpText()
+    const want = arg.trim().toLowerCase()
+    if (want === 'off' || want === 'stop') {
+      this.followed = null
+      await soft(() => this.saveFollow())
+      this.refresh()
+      return 'Typing here is yours again: it goes to Claude here, not to Multiplayer.'
+    }
+    const convs = s.conversationOrder.map((id) => s.conversations[id]).filter(Boolean)
+    const latest = (cid: string) => Math.max(0, ...Object.values(s.turns).filter((t) => t.conversationId === cid).map((t) => t.requestedAt))
+    const pick = want
+      ? convs.find((c) => c.title.toLowerCase() === want) ?? convs.find((c) => c.title.toLowerCase().startsWith(want))
+      : [...convs].sort((a, b) => Number(s.branches[b.mainBranchId]?.runnerId === this.me) - Number(s.branches[a.mainBranchId]?.runnerId === this.me) || latest(b.id) - latest(a.id))[0]
+    if (!pick) return `No conversation here is called “${arg.trim()}”. They are: ${convs.map((c) => `“${c.title}”`).join(', ')}.`
+    this.followed = pick.id
+    await soft(() => this.saveFollow())
+    this.refresh()
+    return `Typing here goes to “${pick.title}” now. Enter sends it to Claude there, or adds it to the turn Claude is on, as Claude Code queues a message; ctrl+x enter only adds your part to the next prompt. /multiplayer follow off makes typing here yours again.`
+  }
+
+  private async saveFollow(): Promise<void> {
+    const all = ((await soft(() => this.io.storeGet(STORE_FOLLOW))) ?? {}) as Record<string, string>
+    const space = this.session?.spaceId
+    if (!space) return
+    if (this.followed) all[space] = this.followed; else delete all[space]
+    await this.io.storeSet(STORE_FOLLOW, all)
+  }
+
+  /** At sign-in: the conversation this space's typing went to before. */
+  private async loadFollow(): Promise<void> {
+    const all = ((await soft(() => this.io.storeGet(STORE_FOLLOW))) ?? {}) as Record<string, string>
+    const space = this.session?.spaceId
+    this.followed = space && typeof all[space] === 'string' ? all[space] : null
+  }
+
+  /**
+   * A line typed here while following a conversation: added to the turn Claude is on there (when
+   * this person may), else sent as a turn, or with `wait` only added for the next prompt. What it
+   * says back is shown in place of the prompt (the model here never reads it). Null: not ours.
+   */
+  async typed(text: string, wait: boolean): Promise<string | null> {
+    const c = this.followConv()
+    const s = this.state
+    const w = this.wire
+    if (!c || !s || !w) return null
+    const t = text.trim()
+    if (!t) return null
+    const b = s.branches[c.mainBranchId]
+    const running = Object.values(s.turns).find((x) => x.branchId === c.mainBranchId && ['requested', 'running', 'approval'].includes(x.status))
+    if (running && !wait && !steerRefusal(s, running, this.me)) {
+      const r = await w.command({ type: 'turn.steer', turnId: running.id, text: t })
+      return r.ok ? `Queued for Claude in “${c.title}”: it reads it as soon as its current step finishes.` : `Not queued: ${r.error}`
+    }
+    if (!b) return 'That conversation is gone. /multiplayer follow picks another.'
+    const added = await w.command({ type: 'part.add', branchId: b.id, text: t })
+    if (!added.ok) return `Not added: ${added.error}`
+    if (wait || running) return running ? `Added to the next prompt in “${c.title}”: Claude is on a turn there you can’t add to.` : `Added to the next prompt in “${c.title}”.`
+    const sent = await w.command({ type: 'turn.send', branchId: b.id })
+    return sent.ok ? `Sent to Claude in “${c.title}”.` : `Added to the next prompt in “${c.title}”, not sent: ${sent.error}`
+  }
+
+  /** The band's Stop: the running turn, through the space (anyone who may write can stop one). */
+  async stopTurn(turnId: string): Promise<string> {
+    const r = await this.wire?.command({ type: 'turn.stop', turnId })
+    return r?.ok ? 'Stopping it; what Claude wrote so far stays.' : `Couldn’t stop it: ${r?.error ?? 'not connected'}.`
   }
 
   /** Redraws the status line and the pane's values when they changed. */

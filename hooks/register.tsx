@@ -138,6 +138,11 @@ export const register: Register = (on, options) => {
       setView: (v) => $.state.set(VIEW, v),
       setFeed: (turnId, feed) => $.state.set({ plugin: 'multiplayer', key: 'feed', id: turnId }, feed),
       place: (id) => $.ui.place({ id }),
+      note: async (text) => {
+        const id = `note-${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`
+        await $.state.set({ plugin: 'multiplayer', key: 'note', id }, text)
+        await $.ui.place({ id })
+      },
       sleep: (ms) => $.clock.sleep(ms),
       after: (ms, fn) => $.clock.after(ms, fn),
       model: () => $.session.model(),
@@ -212,7 +217,21 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'multiplayer' }, async ($, e) => {
     const r = await rt.command(e.args)
     if (r.openPane) await $.ui.open({ id: PANE, title: 'Multiplayer' }).catch(() => undefined)
-    return { text: r.text }
+    // Its answer is the person's to read, never the model's: a row the model doesn't read (a
+    // command's own text it would, on the person's next turn).
+    if (r.text) {
+      const id = `note-${Date.now().toString(36)}${Math.floor(Math.random() * 1e6).toString(36)}`
+      await $.state.set({ plugin: 'multiplayer', key: 'note', id }, r.text).then(() => $.ui.place({ id })).catch(() => $.ui.log(r.text))
+    }
+    return {}
+  })
+
+  // Following a conversation: what the person types here goes to it (a part and a send, or added
+  // to the turn Claude is on), never to the model here. Only their own Enter, never a command.
+  on('prompt.submit', async ($, e, next) => {
+    if (child || e.command || e.isMeta || (e.origin && e.origin.kind !== 'composer') || !rt.followConv()) return next(e)
+    const said = await rt.typed(e.text, e.wait)
+    return said === null ? next(e) : { drop: `Multiplayer: ${said}` }
   })
 
   // The person's own turns in this session: a shared turn waits for them to finish.
@@ -248,7 +267,7 @@ export const register: Register = (on, options) => {
     if (child) return next(e)
     const v: MultiplayerView = await read($, view)
     if (!v.isSignedIn || v.needsYou) return next(e)
-    const label = `multiplayer: ${v.space || 'space'}${v.status === 'connected' ? '' : ` · ${v.status}`}`
+    const label = `multiplayer: ${v.space || 'space'}${v.status === 'connected' ? '' : ` · ${v.status}`}${v.follow ? ` · typing goes to “${v.follow}”` : ''}`
     return next({ ...e, props: { ...e.props, modes: [...e.props.modes, label] } })
   })
 
@@ -258,7 +277,19 @@ export const register: Register = (on, options) => {
   // what, its steps, the answer as it comes, what people added while Claude worked, an approval
   // waiting here, and one line on where it stands. Display only: the model never reads it.
   on('ui.render', { component: 'Placed' }, async ($, e, next) => {
-    if (child || e.props.plugin !== 'multiplayer' || !e.props.id.startsWith('turn-')) return next(e)
+    if (child || e.props.plugin !== 'multiplayer') return next(e)
+    if (e.props.id.startsWith('note-')) {
+      const { value: note } = await $.state.get({ plugin: 'multiplayer', key: 'note', id: e.props.id })
+      if (typeof note !== 'string') return next(e)
+      const { Box, Text, Markdown } = $.ui.resolve(e)
+      return (
+        <Box flexDirection="column">
+          <Text dimColor>multiplayer</Text>
+          <Markdown text={note.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g, '')} />
+        </Box>
+      )
+    }
+    if (!e.props.id.startsWith('turn-')) return next(e)
     const { value } = await $.state.get({ plugin: 'multiplayer', key: 'feed', id: e.props.id.slice(5) })
     const f = value as MultiplayerFeed | undefined
     if (!f) return next(e)
@@ -296,6 +327,57 @@ export const register: Register = (on, options) => {
           </Box>
         ) : null}
         <Text dimColor color={f.status === 'failed' ? 'error' : going ? 'claude' : undefined}>{`${going ? '✻' : '⎿'} ${f.line}`}</Text>
+      </Box>
+    )
+  })
+
+  // -------------------------------------------------------------------- band
+
+  // Above the prompt, what's happening in the space now and what needs you, with its buttons:
+  // an approval for a turn here, someone asking this Claude Code, Claude at work, who's writing,
+  // where typing goes. Nothing to say: the engine's own.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (child || e.props.hasSurvey) return next(e)
+    const v: MultiplayerView = await read($, view)
+    if (!v.isSignedIn) return next(e)
+    const ask = (v.asks ?? [])[0]
+    const now = (v.now ?? [])[0]
+    const writers = v.writers ?? []
+    if (!v.approval && !ask && !now && !writers.length && !v.follow) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const width = Math.max(20, e.props.bodyColumns)
+    const fit = (s: string) => (s.length > width ? s.slice(0, width - 1) + '…' : s)
+    const run = async (args: string) => {
+      const r = await rt.command(args)
+      if (r.text) $.ui.toast(`Multiplayer: ${r.text}`)
+    }
+    return (
+      <Box flexDirection="column">
+        {v.approval ? (
+          <Box>
+            <Text color="permission">{fit(`Claude wants to: ${v.approval.title} `)}</Text>
+            <Button key="band-allow" hotkey="1" variant="primary" label="Allow" onPress={() => void run('allow')} />
+            {v.approval.always ? <Button key="band-always" hotkey="2" label="Always" onPress={() => void run('allow always')} /> : null}
+            <Button key="band-deny" hotkey="3" label="Deny" onPress={() => void run('deny')} />
+          </Box>
+        ) : null}
+        {!v.approval && ask ? (
+          <Box>
+            <Text color="warning">{fit(`${ask.kind === 'project' ? `A turn in “${ask.space}” is for this Claude Code, open in another project` : ask.kind === 'run-here' ? `${ask.from} wants to send to your Claude Code` : `${ask.from} wants to move “${ask.space}”`} `)}</Text>
+            <Button key="band-ask-yes" hotkey="1" variant="primary" label={ask.kind === 'project' ? 'Run it here' : 'Allow'} onPress={() => void run('allow')} />
+            <Button key="band-ask-no" hotkey="3" label="Deny" onPress={() => void run('deny')} />
+          </Box>
+        ) : null}
+        {now ? (
+          <Box>
+            <Text color="claude">{fit(`✻ ${now.line} `)}</Text>
+            <Button key="band-stop" label="Stop" onPress={() => void rt.stopTurn(now.turnId).then((said) => $.ui.toast(`Multiplayer: ${said}`))} />
+          </Box>
+        ) : null}
+        {writers.slice(0, 2).map((w) => (
+          <Text dimColor>{fit(w.draft ? `${w.who} is writing: ${w.draft}` : `${w.who} is writing…`)}</Text>
+        ))}
+        {v.follow ? <Text dimColor>{fit(`Typing here goes to “${v.follow}” · /multiplayer follow off`)}</Text> : null}
       </Box>
     )
   })
