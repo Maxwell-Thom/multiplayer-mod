@@ -33,12 +33,12 @@ export type MultiplayerView = {
   people: MultiplayerPerson[]
   turns: MultiplayerTurnRow[]
   /** An approval this runner is waiting on, if any (`always`: what "don't ask again" would cover). */
-  approval: { tool: string; title: string; always?: string } | null
+  approval: { requestId?: string; tool: string; title: string; always?: string } | null
   /**
    * People asking this Claude Code something, oldest first: to run their turn here, or to move a
    * conversation. `space`: the conversation's title. (Absent in a view kept from before.)
    */
-  asks?: { from: string; kind: 'run-here' | 'move' | 'project'; space: string }[]
+  asks?: { id?: string; from: string; kind: 'run-here' | 'move' | 'project'; space: string }[]
   /** What Claude is doing now in the space, newest first: for the band above the prompt. */
   now?: { turnId: string; line: string }[]
   /** Who's writing (others), with their words when they show them. */

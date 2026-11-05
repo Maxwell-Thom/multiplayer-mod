@@ -8,6 +8,7 @@ import type { MultiplayerFeed, MultiplayerView } from '../types'
 import type { Port } from './port.ts'
 import { privateSource } from './lib/privacy.ts'
 import { EMPTY_VIEW, PANE, Runner } from './runner.ts'
+import { one as oneLine } from './feed.ts'
 
 /** JSON with every object's keys in order, so the same input always reads the same. */
 function canonical(v: unknown): string {
@@ -229,9 +230,13 @@ export const register: Register = (on, options) => {
   // Following a conversation: what the person types here goes to it (a part and a send, or added
   // to the turn Claude is on), never to the model here. Only their own Enter, never a command.
   on('prompt.submit', async ($, e, next) => {
-    if (child || e.command || e.isMeta || (e.origin && e.origin.kind !== 'composer') || !rt.followConv()) return next(e)
+    // (Only a prompt that says it's the person's own Enter: one that doesn't say, or a plugin's, is the model's.)
+    if (child || e.command || e.isMeta || e.origin?.kind !== 'composer' || !rt.followConv()) return next(e)
     const said = await rt.typed(e.text, e.wait)
-    return said === null ? next(e) : { drop: `Multiplayer: ${said}` }
+    if (said === null) return next(e)
+    // Gone to the space: the box empties, as a sent prompt's does.
+    if (said.ok) await $.prompt.fill({ text: '', mode: 'replace' }).catch(() => undefined)
+    return { drop: said.text }
   })
 
   // The person's own turns in this session: a shared turn waits for them to finish.
@@ -297,7 +302,8 @@ export const register: Register = (on, options) => {
     const going = f.status === 'running' || f.status === 'approval' || f.status === 'waiting' || f.status === 'held' || f.status === 'paused'
     const dot = (state: string) => (state === 'fail' ? 'error' : state === 'wait' ? 'warning' : state === 'run' ? 'claude' : undefined)
     const answer = async (decision: 'allow-once' | 'allow-always' | 'deny') => {
-      const said = await rt.answerLocally(decision)
+      // Only the question this row shows: one that came meanwhile is never answered by this press.
+      const said = await rt.answerLocally(decision, f.approval?.requestId ?? '-')
       $.ui.toast(`Multiplayer: ${said}`)
     }
     return (
@@ -320,9 +326,9 @@ export const register: Register = (on, options) => {
           <Box flexDirection="column">
             <Text color="permission">{`Claude wants to: ${f.approval.title}`}</Text>
             <Box>
-              <Button key={`yes:${f.id}`} hotkey="1" variant="primary" label="Yes" onPress={() => void answer('allow-once')} />
-              {f.approval.always ? <Button key={`always:${f.id}`} hotkey="2" label={`Yes, ${f.approval.always.toLowerCase()}`} onPress={() => void answer('allow-always')} /> : null}
-              <Button key={`no:${f.id}`} hotkey="3" label="No" onPress={() => void answer('deny')} />
+              <Button key={`yes:${f.approval.requestId}`} hotkey="1" variant="primary" label="Yes" onPress={() => void answer('allow-once')} />
+              {f.approval.always ? <Button key={`always:${f.approval.requestId}`} hotkey="2" label={`Yes, ${f.approval.always.toLowerCase()}`} onPress={() => void answer('allow-always')} /> : null}
+              <Button key={`no:${f.approval.requestId}`} hotkey="3" label="No" onPress={() => void answer('deny')} />
             </Box>
           </Box>
         ) : null}
@@ -346,26 +352,25 @@ export const register: Register = (on, options) => {
     if (!v.approval && !ask && !now && !writers.length && !v.follow) return next(e)
     const { Box, Text, Button } = $.ui.resolve(e)
     const width = Math.max(20, e.props.bodyColumns)
-    const fit = (s: string) => (s.length > width ? s.slice(0, width - 1) + '…' : s)
-    const run = async (args: string) => {
-      const r = await rt.command(args)
-      if (r.text) $.ui.toast(`Multiplayer: ${r.text}`)
-    }
+    const fit = (raw: string) => { const s = oneLine(raw); return s.length > width ? s.slice(0, width - 1) + '…' : s }
+    // Each button answers the request it shows, by its id: never another that came meanwhile.
+    const approve = async (decision: 'allow-once' | 'allow-always' | 'deny') => $.ui.toast(`Multiplayer: ${await rt.answerLocally(decision, v.approval?.requestId ?? '-')}`)
+    const answerAsk = async (allow: boolean) => $.ui.toast(`Multiplayer: ${ask?.id ? await rt.answerAskById(ask.id, allow) : 'That request was already answered.'}`)
     return (
       <Box flexDirection="column">
         {v.approval ? (
           <Box>
             <Text color="permission">{fit(`Claude wants to: ${v.approval.title} `)}</Text>
-            <Button key="band-allow" hotkey="1" variant="primary" label="Allow" onPress={() => void run('allow')} />
-            {v.approval.always ? <Button key="band-always" hotkey="2" label="Always" onPress={() => void run('allow always')} /> : null}
-            <Button key="band-deny" hotkey="3" label="Deny" onPress={() => void run('deny')} />
+            <Button key={`band-allow:${v.approval.requestId ?? ''}`} hotkey="1" variant="primary" label="Allow" onPress={() => void approve('allow-once')} />
+            {v.approval.always ? <Button key={`band-always:${v.approval.requestId ?? ''}`} hotkey="2" label="Always" onPress={() => void approve('allow-always')} /> : null}
+            <Button key={`band-deny:${v.approval.requestId ?? ''}`} hotkey="3" label="Deny" onPress={() => void approve('deny')} />
           </Box>
         ) : null}
         {!v.approval && ask ? (
           <Box>
             <Text color="warning">{fit(`${ask.kind === 'project' ? `A turn in “${ask.space}” is for this Claude Code, open in another project` : ask.kind === 'run-here' ? `${ask.from} wants to send to your Claude Code` : `${ask.from} wants to move “${ask.space}”`} `)}</Text>
-            <Button key="band-ask-yes" hotkey="1" variant="primary" label={ask.kind === 'project' ? 'Run it here' : 'Allow'} onPress={() => void run('allow')} />
-            <Button key="band-ask-no" hotkey="3" label="Deny" onPress={() => void run('deny')} />
+            <Button key={`band-ask-yes:${ask.id ?? ''}`} variant="primary" label={ask.kind === 'project' ? 'Run it here' : 'Allow'} onPress={() => void answerAsk(true)} />
+            <Button key={`band-ask-no:${ask.id ?? ''}`} label="Deny" onPress={() => void answerAsk(false)} />
           </Box>
         ) : null}
         {now ? (
@@ -388,7 +393,7 @@ export const register: Register = (on, options) => {
     const { Box, Text, Link } = $.ui.resolve(e)
     const v: MultiplayerView = await read($, view)
     const width = Math.max(20, e.props.bodyColumns)
-    const fit = (s: string) => (s.length > width ? s.slice(0, width - 1) + '…' : s)
+    const fit = (raw: string) => { const s = oneLine(raw); return s.length > width ? s.slice(0, width - 1) + '…' : s }
     if (!v.isSignedIn) {
       return (
         <Box flexDirection="column">

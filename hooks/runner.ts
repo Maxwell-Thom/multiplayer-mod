@@ -1671,9 +1671,11 @@ export class Runner {
   }
 
   /** `/multiplayer allow|deny`: answers the oldest open question of the running turn. */
-  async answerLocally(decision: Decision): Promise<string> {
+  /** `requestId`: only that question (a button's), never another that came meanwhile. */
+  async answerLocally(decision: Decision, requestId?: string): Promise<string> {
     const a = this.active
-    const p = a ? [...a.approvals.values()][0] : undefined
+    const p = a ? (requestId ? a.approvals.get(requestId) : [...a.approvals.values()][0]) : undefined
+    if (requestId && !p) return 'That question was already answered, or the turn ended.'
     if (!a || !p || !this.wire) return 'No approval is waiting.'
     // Claude's question with options (AskUserQuestion): asked here, as Claude Code itself asks it.
     if (p.questions?.length) {
@@ -1737,8 +1739,14 @@ export class Runner {
   }
 
   /** /multiplayer allow [always] or deny, for the oldest ask to this Claude Code. Null when none is open. */
-  private async answerAsk(allow: boolean, always: boolean): Promise<string | null> {
-    const a = this.asksToMe()[0]
+  /** A button's answer to the ask it shows (`askId`), never another that came meanwhile. */
+  async answerAskById(askId: string, allow: boolean): Promise<string> {
+    return (await this.answerAsk(allow, false, askId)) ?? 'That request was already answered.'
+  }
+
+  private async answerAsk(allow: boolean, always: boolean, askId?: string): Promise<string | null> {
+    const a = askId ? this.asksToMe().find((x) => x.id === askId) : this.asksToMe()[0]
+    if (askId && !a) return 'That request was already answered.'
     const w = this.wire
     const s = this.state
     if (!a || !w || !s) return null
@@ -2903,12 +2911,12 @@ export class Runner {
       needsYou: this.needsYou(),
       people,
       turns,
-      approval: pending ? { tool: pending.tool, title: pending.title, ...(pending.always ? { always: pending.always } : {}) } : null,
+      approval: pending ? { requestId: pending.requestId, tool: pending.tool, title: oneLine(pending.title), ...(pending.always ? { always: oneLine(pending.always) } : {}) } : null,
       now: s ? this.nowLines() : [],
       writers: s ? this.presence.filter((p) => p.memberId !== this.me && s.members[p.memberId] && !s.members[p.memberId].leftAt && (p.status === 'writing' || !!p.draft)).slice(0, 3)
-        .map((p) => ({ who: memberName(s, p.memberId), ...(p.draft ? { draft: oneLine(p.draft).slice(0, 300) } : {}) })) : [],
+        .map((p) => ({ who: oneLine(memberName(s, p.memberId)), ...(p.draft ? { draft: oneLine(p.draft).slice(0, 300) } : {}) })) : [],
       ...(this.followConv() ? { follow: oneLine(this.followConv()!.title) } : {}),
-      asks: s ? this.asksToMe().slice(0, 5).map((x) => ({ from: memberName(s, x.from), kind: x.kind === 'move' ? 'move' as const : x.kind === 'project' ? 'project' as const : 'run-here' as const, space: this.convTitle(x.branchId) })) : [],
+      asks: s ? this.asksToMe().slice(0, 5).map((x) => ({ id: x.id, from: oneLine(memberName(s, x.from)), kind: x.kind === 'move' ? 'move' as const : x.kind === 'project' ? 'project' as const : 'run-here' as const, space: oneLine(this.convTitle(x.branchId)) })) : [],
     }
   }
 
@@ -3017,7 +3025,7 @@ export class Runner {
    * this person may), else sent as a turn, or with `wait` only added for the next prompt. What it
    * says back is shown in place of the prompt (the model here never reads it). Null: not ours.
    */
-  async typed(text: string, wait: boolean): Promise<string | null> {
+  async typed(text: string, wait: boolean): Promise<{ text: string; ok: boolean } | null> {
     const c = this.followConv()
     const s = this.state
     const w = this.wire
@@ -3028,14 +3036,14 @@ export class Runner {
     const running = Object.values(s.turns).find((x) => x.branchId === c.mainBranchId && ['requested', 'running', 'approval'].includes(x.status))
     if (running && !wait && !steerRefusal(s, running, this.me)) {
       const r = await w.command({ type: 'turn.steer', turnId: running.id, text: t })
-      return r.ok ? `Queued for Claude in “${c.title}”: it reads it as soon as its current step finishes.` : `Not queued: ${r.error}`
+      return r.ok ? { text: `Queued for Claude in “${c.title}”: it reads it as soon as its current step finishes.`, ok: true } : { text: `Not queued: ${r.error}`, ok: false }
     }
-    if (!b) return 'That conversation is gone. /multiplayer follow picks another.'
+    if (!b) return { text: 'That conversation is gone. /multiplayer follow picks another.', ok: false }
     const added = await w.command({ type: 'part.add', branchId: b.id, text: t })
-    if (!added.ok) return `Not added: ${added.error}`
-    if (wait || running) return running ? `Added to the next prompt in “${c.title}”: Claude is on a turn there you can’t add to.` : `Added to the next prompt in “${c.title}”.`
+    if (!added.ok) return { text: `Not added: ${added.error}`, ok: false }
+    if (wait || running) return { text: running ? `Added to the next prompt in “${c.title}”: Claude is on a turn there you can’t add to.` : `Added to the next prompt in “${c.title}”.`, ok: true }
     const sent = await w.command({ type: 'turn.send', branchId: b.id })
-    return sent.ok ? `Sent to Claude in “${c.title}”.` : `Added to the next prompt in “${c.title}”, not sent: ${sent.error}`
+    return sent.ok ? { text: `Sent to Claude in “${c.title}”.`, ok: true } : { text: `Added to the next prompt in “${c.title}”, not sent: ${sent.error}`, ok: true }
   }
 
   /** The band's Stop: the running turn, through the space (anyone who may write can stop one). */
