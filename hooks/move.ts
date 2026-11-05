@@ -649,7 +649,24 @@ async function unpackPlain(sh: MoveShell, o: { folder: string; file: string; exp
   const m = readManifest((await gitText(sh, [...gd, 'log', '-1', '--format=%B', o.snap], tmp)) ?? '')
   if (!m) return { error: 'The work that arrived couldn’t be read.' }
   if ((m.repo ?? null) !== (o.expectRepo ?? null) || m.head) return o.notThisProject
-  const entries = (await entriesOf(sh, tmp, o.snap, gd, false)) ?? []
+  // A file already here, in any case (NOTES.txt is notes.txt on most disks): its name as it is.
+  const here = async (p: string) => {
+    const dirPart = p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : ''
+    const list = await sh.list(parentOf(`${o.folder}/${p}`)).catch(() => undefined)
+    const x = list?.find((f) => diskName(f.name) === diskName(baseOf(p)))
+    return x ? `${dirPart}${x.name}` : null
+  }
+  const idOf = async (p: string) => gitText(sh, ['hash-object', '--no-filters', '--', slash(`${o.folder}/${p}`)], tmp)
+  // A copy that went beside someone's file ("notes (from Riley).txt"), coming back where that file
+  // is, is that file: renamed before anything is checked, so every check reads it under the name it
+  // would be written to. (`src`: its name in what arrived.)
+  const raw = (await entriesOf(sh, tmp, o.snap, gd, false)) ?? []
+  const names = new Set(raw.map((e) => diskName(e.path)))
+  const entries: (Entry & { src?: string })[] = []
+  for (const e of raw) {
+    const was = e.status !== 'D' && !(await here(e.path)) ? besideOf(e.path) : null
+    entries.push(was && !names.has(diskName(was)) && (await here(was)) ? { ...e, path: was, src: e.path } : e)
+  }
   const place = await placeProblem(sh, tmp, gd, entries, o.windows)
   if (place) return { error: place }
   // Out into a folder of the transfer's own, then copied where each goes.
@@ -667,25 +684,8 @@ async function unpackPlain(sh: MoveShell, o: { folder: string; file: string; exp
   const landed: string[] = []
   for (const e of coming) {
     if (e.mode === '120000' || e.mode === '160000') continue
-    // A file already here, in any case (NOTES.txt is notes.txt on most disks): its name as it is.
-    const here = async (p: string) => {
-      const dirPart = p.includes('/') ? p.slice(0, p.lastIndexOf('/') + 1) : ''
-      const list = await sh.list(parentOf(`${o.folder}/${p}`)).catch(() => undefined)
-      const x = list?.find((f) => diskName(f.name) === diskName(baseOf(p)))
-      return x ? `${dirPart}${x.name}` : null
-    }
-    const idOf = async (p: string) => gitText(sh, ['hash-object', '--no-filters', '--', slash(`${o.folder}/${p}`)], tmp)
     let to = e.path
     const there = await here(e.path)
-    // A copy that went beside someone's file, coming back where that file is: it's that file,
-    // already here as it came, or updated where it is when it's the copy that left untouched since.
-    const was = there ? null : besideOf(e.path)
-    const wasHere = was ? await here(was) : null
-    if (was && wasHere) {
-      const now = await idOf(wasHere)
-      if (now === e.sha) { landed.push(wasHere); continue }
-      if (o.sent?.[was] && now === o.sent[was]) to = wasHere
-    }
     if (there) {
       const now = await idOf(there)
       if (now === e.sha) { landed.push(there); continue }
@@ -702,7 +702,7 @@ async function unpackPlain(sh: MoveShell, o: { folder: string; file: string; exp
         if (alongside) { if ((await idOf(alongside)) === e.sha) landed.push(alongside); continue }
       }
     }
-    const r = await sh.run(['curl', '-sS', '--create-dirs', '-o', slash(`${o.folder}/${to}`), fileUrl(`${stage}/${e.path}`)], { timeoutMs: 120_000 }).catch(() => ({ exitCode: 1 }))
+    const r = await sh.run(['curl', '-sS', '--create-dirs', '-o', slash(`${o.folder}/${to}`), fileUrl(`${stage}/${e.src ?? e.path}`)], { timeoutMs: 120_000 }).catch(() => ({ exitCode: 1 }))
     if (r.exitCode !== 0) return { error: `Couldn’t write ${to} in your folder.` }
     landed.push(to)
   }
