@@ -68,7 +68,7 @@ export type MultiplayerFeed = {
   /** The answer so far. */
   text: string
   /** What people added while Claude worked: queued until read. */
-  queued: { who: string; text: string; state: 'queued' | 'read' }[]
+  queued: { who: string; text: string; state: 'queued' | 'read' | 'unread' }[]
   /** An approval this Claude Code waits on for it (only this runner's own). */
   approval: { requestId: string; title: string; always?: string } | null
 }

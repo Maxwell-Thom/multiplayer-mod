@@ -40,9 +40,10 @@ export function feedOf(s: SpaceState, t: Turn, me: MemberId, o: { now: number; l
   if (held) parts.push({ who: 'Opinions', text: `${held} held back until Claude answers` })
   const all = t.steps ?? []
   const steps: MultiplayerFeedStep[] = all.slice(-FEED_STEPS).map((st) => ({ tool: one(st.tool), text: one(st.text), state: st.state, under: st.under !== undefined }))
-  const taken = t.steersTaken ?? 0
+  // (Handed to its session counts as read: it may be reading it.)
+  const taken = Math.max(t.steersTaken ?? 0, t.steersOut ?? 0)
   const active = ['requested', 'held', 'conflict', 'running', 'approval', 'paused'].includes(t.status)
-  const queued = (t.steers ?? []).filter((x) => !x.withdrawn && !x.carried).map((x) => ({ who: who(x.by), text: block(x.text), state: x.n > taken && active ? 'queued' as const : 'read' as const }))
+  const queued = (t.steers ?? []).filter((x) => !x.withdrawn && !x.carried).map((x) => ({ who: who(x.by), text: block(x.text), state: x.n <= taken ? 'read' as const : active ? 'queued' as const : 'unread' as const }))
   const ask = t.status === 'held' ? openAsks(s, t.id)[0] : undefined
   let status: MultiplayerFeed['status']
   let line: string

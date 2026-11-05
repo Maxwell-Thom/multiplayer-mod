@@ -231,7 +231,8 @@ export const register: Register = (on, options) => {
   // to the turn Claude is on), never to the model here. Only their own Enter, never a command.
   on('prompt.submit', async ($, e, next) => {
     // (Only a prompt that says it's the person's own Enter: one that doesn't say, or a plugin's, is the model's.)
-    if (child || e.command || e.isMeta || e.origin?.kind !== 'composer' || !rt.followConv()) return next(e)
+    // (Nor one with images: they can't go to the space this way.)
+    if (child || e.command || e.isMeta || e.origin?.kind !== 'composer' || (e.attachments?.length ?? 0) > 0 || !rt.followConv()) return next(e)
     const said = await rt.typed(e.text, e.wait)
     if (said === null) return next(e)
     // Gone to the space: the box empties, as a sent prompt's does. (Claude Code puts a dropped
@@ -326,7 +327,7 @@ export const register: Register = (on, options) => {
         ))}
         {f.text ? <Markdown text={f.text} /> : null}
         {f.queued.map((q) => (
-          <Text dimColor={q.state === 'queued'}><Text bold>{`> ${q.who}: `}</Text>{q.text}{q.state === 'queued' ? '  (queued)' : '  (read while Claude worked)'}</Text>
+          <Text dimColor={q.state === 'queued'}><Text bold>{`> ${q.who}: `}</Text>{q.text}{q.state === 'queued' ? '  (queued)' : q.state === 'unread' ? '  (not read)' : '  (read while Claude worked)'}</Text>
         ))}
         {f.approval ? (
           <Box flexDirection="column">

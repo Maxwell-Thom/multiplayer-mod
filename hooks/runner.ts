@@ -822,7 +822,7 @@ export class Runner {
       else if (m.kind === 'transfer.send') void this.sendWork(m)
       else if (m.kind === 'transfer.receive') void this.receiveWork(m)
       else if (m.kind === 'pause' || m.kind === 'resume') void this.setPaused(m.kind === 'pause')
-      else if (m.kind === 'delta') this.othersLive.set(m.turnId, m.text)
+      else if (m.kind === 'delta') { const t = this.turn(m.turnId); if (t && isActive(t)) this.othersLive.set(m.turnId, m.text) }
       else if (m.kind === 'presence') this.presence = [...this.presence.filter((p) => p.memberId !== m.presence.memberId), m.presence]
       else if (m.kind === 'presence.gone') this.presence = this.presence.filter((p) => p.memberId !== m.memberId)
     }
@@ -2955,6 +2955,17 @@ export class Runner {
       }
       if (!going.has(t.status)) this.othersLive.delete(t.id)
     }
+    // A turn that went back to the draft (cancelled: no longer in the space): its row says so, once.
+    for (const id of this.feedPlaced) {
+      if (Object.hasOwn(s.turns, id)) continue
+      const was = this.feedDrawn.get(id)
+      if (!was || was.startsWith('gone:')) continue
+      const f = JSON.parse(was) as MultiplayerFeed
+      const gone: MultiplayerFeed = { ...f, status: 'stopped', line: 'Went back to the draft: it didn’t run', approval: null, queued: f.queued.map((q) => (q.state === 'queued' ? { ...q, state: 'unread' as const } : q)) }
+      this.feedDrawn.set(id, `gone:${JSON.stringify(gone)}`)
+      this.othersLive.delete(id)
+      void soft(() => this.io.setFeed!(id, gone))
+    }
   }
 
   /** What Claude is doing now in the space (this Claude Code's own turn first): one line each, for the band. */
@@ -3033,7 +3044,7 @@ export class Runner {
     const t = text.trim()
     if (!t) return null
     const b = s.branches[c.mainBranchId]
-    const running = Object.values(s.turns).find((x) => x.branchId === c.mainBranchId && ['requested', 'running', 'approval'].includes(x.status))
+    const running = Object.values(s.turns).find((x) => x.branchId === c.mainBranchId && ['requested', 'held', 'conflict', 'running', 'approval', 'paused'].includes(x.status))
     if (running && !wait && !steerRefusal(s, running, this.me)) {
       const r = await w.command({ type: 'turn.steer', turnId: running.id, text: t })
       return r.ok ? { text: `Queued for Claude in “${c.title}”: it reads it as soon as its current step finishes.`, ok: true } : { text: `Not queued: ${r.error}`, ok: false }

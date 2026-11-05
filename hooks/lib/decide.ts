@@ -183,7 +183,9 @@ function routeTurn(s: SpaceState, ctx: CommandContext, branch: Branch, senderId:
  */
 function queuedAfter(s: SpaceState, ctx: CommandContext, t: Turn, ended: 'done' | 'stopped' | 'failed'): EventBody[] {
   // (A refused command never becomes a part, whenever it was queued.)
-  const unread = (t.steers ?? []).filter((x) => x.n > (t.steersTaken ?? 0) && !x.withdrawn && !slashRefusal(x.text));
+  // (One its session was handed counts as read: the session's "read" can be lost on its way, and a
+  // message read twice beats one sent again as a turn of its own.)
+  const unread = (t.steers ?? []).filter((x) => x.n > Math.max(t.steersTaken ?? 0, t.steersOut ?? 0) && !x.withdrawn && !slashRefusal(x.text));
   const b = s.branches[t.branchId];
   if (!unread.length || !b || isOneOff(t) || b.state === 'merged') return [];
   const ns = unread.map((x) => x.n);
