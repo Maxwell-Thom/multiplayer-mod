@@ -165,8 +165,8 @@ export type RunEvent =
   /** An assistant message the session stored: a turn's last one is where a later fork starts. */
   | { kind: 'message'; uuid: string; model?: string }
   | { kind: 'rate'; status: string; resetsAt?: number; type?: string }
-  /** `fastState`: whether fast mode ran ('on', 'off'), as the result says. */
-  | { kind: 'result'; isError: boolean; subtype: string; text: string; usage?: ResultUsage; errors: string[]; fastState?: string }
+  /** `fastState`: whether fast mode ran ('on', 'off', 'cooldown'), as the result says; `fastReason`: why not, its code. */
+  | { kind: 'result'; isError: boolean; subtype: string; text: string; usage?: ResultUsage; errors: string[]; fastState?: string; fastReason?: string }
   /** Claude Code's guess at the next prompt, written after the result. */
   | { kind: 'suggestion'; text: string }
   /** Something Claude Code said about the session (fast mode turned off, and the like). */
@@ -278,7 +278,7 @@ export class StreamReader {
       }
       case 'result': {
         const errors = Array.isArray(m.errors) ? m.errors.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))) : []
-        return [{ kind: 'result', isError: m.is_error === true, subtype: str(m.subtype), text: str(m.result), usage: obj(m.usage) as ResultUsage, errors, ...(str(m.fast_mode_state) ? { fastState: str(m.fast_mode_state) } : {}) }]
+        return [{ kind: 'result', isError: m.is_error === true, subtype: str(m.subtype), text: str(m.result), usage: obj(m.usage) as ResultUsage, errors, ...(str(m.fast_mode_state) ? { fastState: str(m.fast_mode_state) } : {}), ...(str(m.fast_mode_disabled_reason) ? { fastReason: str(m.fast_mode_disabled_reason) } : {}) }]
       }
       case 'prompt_suggestion': {
         const text = str(m.suggestion).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim().slice(0, 2000)

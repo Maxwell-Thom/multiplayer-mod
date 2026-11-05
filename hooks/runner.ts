@@ -104,11 +104,30 @@ export type BranchSession = { id: string; through: string | null; at: Record<str
 type Pending = { requestId: string; tool: string; title: string; always?: string; questions?: AskQuestion[]; i: number | undefined }
 
 /** The shared turn this runner is running (one at a time). */
-/** runner.done's fast and notices: fast mode as it ran (a notice that it turned off means it didn't). */
-function ranWith(a: Pick<Active, 'fast' | 'notices' | 'fastState' | 'suggestion'>): { fast?: boolean; notices?: string[]; suggestion?: string } {
-  const notices = a.notices ?? []
-  // The result says whether fast mode ran; a notice that it turned off says it too.
-  const off = a.fastState === 'off' || notices.some((n) => /fast mode/i.test(n) && /disabled|turned off|unavailable|exhausted|not available/i.test(n))
+/** Why fast mode didn't run, by the reason code Claude Code's result gives (its own words, made plain). */
+const FAST_WHY: Record<string, string> = {
+  free: 'Fast mode didn’t run: the account of the Claude Code it ran in has no paid plan or usage credits for it.',
+  extra_usage_disabled: 'Fast mode didn’t run: usage credits are off for the account of the Claude Code it ran in.',
+  preference: 'Fast mode didn’t run: the organization has turned it off.',
+  model_not_allowed: 'Fast mode didn’t run: the organization doesn’t allow its model.',
+  not_first_party: 'Fast mode didn’t run: it needs the Anthropic API, and the Claude Code it ran in uses another provider.',
+  disabled_by_env: 'Fast mode didn’t run: CLAUDE_CODE_DISABLE_FAST_MODE is set where it ran.',
+  sdk_opt_in_required: 'Fast mode didn’t run: its session wasn’t started with it.',
+  network_error: 'Fast mode didn’t run: Claude Code couldn’t check it was available.',
+  unknown: 'Fast mode didn’t run: Claude Code couldn’t check it was available.',
+  pending: 'Fast mode didn’t run: Claude Code hadn’t finished checking it was available.',
+}
+
+/** runner.done's fast and notices: fast mode as it ran (a notice that it turned off means it didn't), and why not. */
+function ranWith(a: Pick<Active, 'fast' | 'notices' | 'fastState' | 'fastReason' | 'suggestion'>): { fast?: boolean; notices?: string[]; suggestion?: string } {
+  const notices = [...(a.notices ?? [])]
+  // The result says whether fast mode ran ('cooldown' is standard speed too); a notice that it turned off says it too.
+  const said = notices.some((n) => /fast mode/i.test(n) && /disabled|turned off|unavailable|exhausted|not available|usage credits/i.test(n))
+  const off = (!!a.fastState && a.fastState !== 'on') || said
+  if (a.fast && off && !said && notices.length < 5) {
+    notices.push(a.fastState === 'cooldown' ? 'Fast mode is cooling down after its rate limit, so this turn ran at standard speed.'
+      : (a.fastReason && Object.hasOwn(FAST_WHY, a.fastReason) ? FAST_WHY[a.fastReason] : 'Fast mode didn’t run, so this turn ran at standard speed.'))
+  }
   return { ...(a.fast !== undefined ? { fast: a.fast && !off } : {}), ...(notices.length ? { notices } : {}), ...(a.suggestion ? { suggestion: a.suggestion } : {}) }
 }
 
@@ -130,6 +149,8 @@ export type Active = {
   notices?: string[]
   /** Whether fast mode ran, as its result says ('on', 'off'). */
   fastState?: string
+  /** Why fast mode didn't run, the result's reason code. */
+  fastReason?: string
   /** Claude Code's guess at the next prompt. */
   suggestion?: string
   /** Text so far, the block streaming now included. */
@@ -1413,7 +1434,7 @@ export class Runner {
           else if (ev.kind === 'tool-result') this.endStep(a, ev.id, ev.isError ? (isRefusal(ev.text) ? 'denied' : 'fail') : 'done')
           else if (ev.kind === 'message') { lastUuid = ev.uuid; if (ev.model) a.model = ev.model }
           else if (ev.kind === 'rate') { if (ev.status === 'rejected') rate = ev }
-          else if (ev.kind === 'result') { result = ev; if (ev.fastState) a.fastState = ev.fastState }
+          else if (ev.kind === 'result') { result = ev; if (ev.fastState) a.fastState = ev.fastState; if (ev.fastReason) a.fastReason = ev.fastReason }
           else if (ev.kind === 'suggestion') a.suggestion = ev.text
         }
         if (a.stopped) break
