@@ -442,7 +442,8 @@ export class Runner {
   private async cmdHere(name: string): Promise<string> {
     const list = (await this.elsewhere()).concat(this.session ? [this.session] : [])
     const want = name.trim().toLowerCase()
-    const pick = want ? list.find((s) => (s.spaceName ?? '').toLowerCase().startsWith(want)) : (await this.elsewhere())[0] ?? this.session
+    // No name: the space this Claude Code is in, else the last one connected elsewhere.
+    const pick = want ? list.find((s) => (s.spaceName ?? '').toLowerCase().startsWith(want)) : this.session ?? list[0]
     if (!pick) return `No space to bring here.${want ? ` None is called “${name.trim()}”.` : ''} /multiplayer join <code>, or /multiplayer connect <pairing code> from the web app.`
     const title = pick.spaceName ?? 'Your space'
     if (this.session?.spaceId === pick.spaceId && this.wire) {
