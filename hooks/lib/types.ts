@@ -56,6 +56,12 @@ export interface MemberPrefs {
   mode?: 'own' | 'default' | 'acceptEdits' | 'auto';
   credits?: 'off' | 'mine' | 'everyone';
   budget?: number;
+  /** What others see of this person (only the non-default value is kept): where they are and when
+   * they're writing (on unless false), what they've read (on unless false), and the text of their
+   * typing as they type (off unless true). */
+  activity?: boolean;
+  receipts?: boolean;
+  typing?: boolean;
 }
 
 export interface Member {
@@ -345,6 +351,9 @@ export interface TurnWork {
 
 /** The most a move carries machine to machine; more than that should be pushed. */
 export const TRANSFER_MAX_BYTES = 200 * 1024 * 1024;
+
+/** The most of a person's draft others see as they type. */
+export const PRESENCE_DRAFT_MAX = 2000;
 /** One relay chunk. */
 export const TRANSFER_CHUNK_BYTES = 8 * 1024 * 1024;
 
@@ -545,6 +554,8 @@ export interface SpaceState {
   pushes: FilesPush[];
   /** Last event seq each member has seen, for "since you left". */
   seen: Record<MemberId, number>;
+  /** When each person last looked at each branch (server time), for read receipts: only theirs who keep receipts on. */
+  seenOn?: Record<Id, Record<MemberId, number>>;
   /**
    * What each person shares with this space from their own world (docs/PRIVACY.md), by source id
    * (`connector:Gmail`, `outside`...). Each person sees only their own.
@@ -564,6 +575,8 @@ export interface Presence {
   status: 'here' | 'writing' | 'approving' | 'away';
   branchId?: Id;
   conversationId?: Id;
+  /** What they're typing on `branchId`, as they type it: only theirs who turn that on. Never stored. */
+  draft?: string;
   at: number;
 }
 

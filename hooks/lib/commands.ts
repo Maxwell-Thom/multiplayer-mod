@@ -6,7 +6,7 @@ export type Command =
   // members and the space
   | { type: 'member.rename'; name: string }
   | { type: 'member.notify'; notify: Member['notify'] }
-  | { type: 'member.prefs'; mode?: MemberPrefs['mode']; credits?: MemberPrefs['credits']; budget?: number }
+  | { type: 'member.prefs'; mode?: MemberPrefs['mode']; credits?: MemberPrefs['credits']; budget?: number; activity?: boolean; receipts?: boolean; typing?: boolean }
   /** Share a private source with this space, or stop (`source: '*'` with `on: false` stops everything). */
   | { type: 'sharing.set'; source: string; name: string; on: boolean }
   | { type: 'member.role'; memberId: MemberId; role: Role }
@@ -69,7 +69,8 @@ export type Command =
   /** From your private lane to its main (fromBranchId), or from your own Claude Code to a branch (toBranchId). */
   | { type: 'share.post'; fromBranchId?: Id; toBranchId?: Id; text: string; question?: string }
   | { type: 'recap.request'; conversationId: Id; text: string }
-  | { type: 'seen'; seq: number }
+  /** `branchId`: the branch they're looking at, for read receipts. */
+  | { type: 'seen'; seq: number; branchId?: Id }
   // runner only: the member's own Claude Code (or claude.ai) reporting on turns it runs
   | { type: 'runner.check'; turnId: Id; conflict: NonNullable<Turn['conflict']> }
   | { type: 'runner.start'; turnId: Id; model?: string }

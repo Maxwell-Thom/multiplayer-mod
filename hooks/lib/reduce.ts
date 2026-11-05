@@ -107,6 +107,10 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     case 'member.prefs': {
       const m = s.members[e.memberId];
       if (m) s.members = { ...s.members, [e.memberId]: { ...m, prefs: { ...e.prefs, ...(m.prefs?.budget !== undefined ? { budget: m.prefs.budget } : {}) } } };
+      // Read receipts turned off: the ones already there go too.
+      if (e.prefs.receipts === false && s.seenOn && Object.values(s.seenOn).some((x) => e.memberId in x)) {
+        s.seenOn = Object.fromEntries(Object.entries(s.seenOn).map(([b, x]) => [b, Object.fromEntries(Object.entries(x).filter(([k]) => k !== e.memberId))]));
+      }
       return s;
     }
     case 'member.budget': {
@@ -372,6 +376,7 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
       return pushTimeline(s, e.branchId, e.item);
     case 'seen':
       s.seen = { ...s.seen, [e.memberId]: Math.max(s.seen[e.memberId] || 0, e.seq) };
+      if (e.branchId && e.at !== undefined) s.seenOn = { ...s.seenOn, [e.branchId]: { ...s.seenOn?.[e.branchId], [e.memberId]: e.at } };
       return s;
   }
   return s;

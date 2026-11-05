@@ -116,7 +116,8 @@ export type RunnerInbound =
 
 export type ClientMessage =
   | { kind: 'command'; reqId: string; cmd: Command }
-  | { kind: 'presence'; status: Presence['status']; branchId?: Id; conversationId?: Id }
+  /** `draft`: what they're typing on `branchId`, when they show it (the server drops it otherwise). */
+  | { kind: 'presence'; status: Presence['status']; branchId?: Id; conversationId?: Id; draft?: string }
   /** `answers`: for Claude's question (AskUserQuestion), each question's text to the option(s) picked, or the person's own words. */
   | { kind: 'approval.answer'; turnId: Id; requestId: string; decision: 'allow-once' | 'allow-always' | 'deny'; answers?: Record<string, string> }
   | { kind: 'files.request'; requestId: string; action: FilesAction }

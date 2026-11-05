@@ -75,7 +75,8 @@ export type EventBody =
   | { type: 'note.shared'; note: Note }
   | { type: 'files.pushed'; push: FilesPush }
   | { type: 'timeline.event'; branchId: Id; item: Extract<TimelineItem, { kind: 'event' }> }
-  | { type: 'seen'; memberId: MemberId; seq: number };
+  /** `branchId` and `at`: they looked at that branch then (a read receipt). */
+  | { type: 'seen'; memberId: MemberId; seq: number; branchId?: Id; at?: number };
 
 export type SpaceEvent = EventBody & { seq: number; at: number; actor: MemberId | 'server' };
 export type EventType = EventBody['type'];

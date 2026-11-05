@@ -245,7 +245,13 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const out: EventBody[] = [];
       const mode = cmd.mode ?? was.mode;
       const credits = cmd.credits ?? was.credits;
-      if (cmd.mode !== undefined || cmd.credits !== undefined) out.push({ type: 'member.prefs', memberId: actor as MemberId, prefs: { ...(mode ? { mode } : {}), ...(credits ? { credits } : {}) } });
+      // What others see of you: only a value that isn't the default is kept.
+      const activity = cmd.activity ?? was.activity !== false;
+      const receipts = cmd.receipts ?? was.receipts !== false;
+      const typing = cmd.typing ?? was.typing === true;
+      if ([cmd.mode, cmd.credits, cmd.activity, cmd.receipts, cmd.typing].some((v) => v !== undefined)) {
+        out.push({ type: 'member.prefs', memberId: actor as MemberId, prefs: { ...(mode ? { mode } : {}), ...(credits ? { credits } : {}), ...(activity ? {} : { activity: false }), ...(receipts ? {} : { receipts: false }), ...(typing ? { typing: true } : {}) } });
+      }
       if (cmd.budget !== undefined) out.push({ type: 'member.budget', memberId: actor as MemberId, budget: cmd.budget });
       if (!out.length) return fail('Nothing to change.');
       return ok(...out);
@@ -1002,9 +1008,16 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const turn = turnFrom(ctx, s, main, [{ memberId: actor as MemberId, text: cmd.text }], { mode: 'recap', private: true, checked: true });
       return ok({ type: 'turn.requested', turn, consumed: [] });
     }
-    case 'seen':
-      if (cmd.seq <= (s.seen[actor] || 0)) return ok();
-      return ok({ type: 'seen', memberId: actor as MemberId, seq: Math.min(cmd.seq, s.seq) });
+    case 'seen': {
+      // A read receipt: the branch they're looking at, if they may see it, keep receipts on, and
+      // something happened there since they last looked.
+      const b = cmd.branchId && Object.hasOwn(s.branches, cmd.branchId) ? s.branches[cmd.branchId] : undefined;
+      const looked = b ? s.seenOn?.[b.id]?.[actor as MemberId] ?? -1 : -1;
+      const latest = b ? Math.max(0, ...turnsOf(s, b.id).map((t) => t.endedAt ?? t.startedAt ?? t.requestedAt)) : 0;
+      const mark = !!b && canSee(s, actor as MemberId, b.id) && s.members[actor as MemberId]?.prefs?.receipts !== false && looked < latest;
+      if (cmd.seq <= (s.seen[actor] || 0) && !mark) return ok();
+      return ok({ type: 'seen', memberId: actor as MemberId, seq: Math.min(cmd.seq, s.seq), ...(mark ? { branchId: b!.id, at: ctx.now } : {}) });
+    }
 
     // --------------------------------------------------------------- runners
     case 'runner.check': {

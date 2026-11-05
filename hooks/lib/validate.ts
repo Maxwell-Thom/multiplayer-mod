@@ -24,7 +24,7 @@ export const IMPORT_STEPS = 300;
 const SPECS: Record<Command['type'], Spec> = {
   'member.rename': { name: 'str:80' },
   'member.notify': { notify: 'enum:needed|all|off' },
-  'member.prefs': { mode: 'enum:own|default|acceptEdits|auto?', credits: 'enum:off|mine|everyone?', budget: 'num?' },
+  'member.prefs': { mode: 'enum:own|default|acceptEdits|auto?', credits: 'enum:off|mine|everyone?', budget: 'num?', activity: 'bool?', receipts: 'bool?', typing: 'bool?' },
   'sharing.set': { source: 'str:200', name: 'str:100', on: 'bool' },
   'member.role': { memberId: 'id', role: 'enum:host|prompter|viewer' },
   'member.leave': { handTo: 'id?', end: 'bool?' },
@@ -68,7 +68,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'aside.share': { turnId: 'id' },
   'share.post': { fromBranchId: 'id?', toBranchId: 'id?', text: TEXT, question: 'str:2000?' },
   'recap.request': { conversationId: 'id', text: 'str:4000' },
-  seen: { seq: 'num' },
+  seen: { seq: 'num', branchId: 'id?' },
   'runner.check': { turnId: 'id', conflict: 'obj' },
   'runner.start': { turnId: 'id', model: 'str:100?' },
   'runner.step': { turnId: 'id', step: 'obj' },

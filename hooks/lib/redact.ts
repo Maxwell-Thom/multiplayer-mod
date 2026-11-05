@@ -61,6 +61,7 @@ export function redactState(full: SpaceState, memberId: MemberId): SpaceState {
     merges: Object.fromEntries(Object.entries(s.merges).filter(([, m]) => !hiddenBranches.has(m.fromBranchId))),
     pushes: s.pushes.filter((p) => !p.branchId || !hiddenBranches.has(p.branchId)),
     notes: Object.fromEntries(Object.entries(s.notes).filter(([, n]) => !hiddenBranches.has(n.branchId))),
+    ...(s.seenOn ? { seenOn: omit(s.seenOn, hiddenBranches) } : {}),
     ...(s.schedules ? { schedules: Object.fromEntries(Object.entries(s.schedules).filter(([, x]) => !hiddenBranches.has(x.branchId))) } : {}),
     ...(s.transfers ? { transfers: Object.fromEntries(Object.entries(s.transfers).filter(([, x]) => !hiddenBranches.has(x.branchId) && (!x.copy || x.from === memberId || x.to === memberId))) } : {}),
     ...(s.files ? { files: Object.fromEntries(Object.entries(s.files).filter(([, f]) => !hiddenBranches.has(f.branchId) && !(f.turnId && hiddenTurns.has(f.turnId)))) } : {}),
@@ -120,6 +121,8 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
       return turnAudience(e.turnId);
     case 'sharing.changed': return [e.memberId];
     case 'member.budget': return [e.memberId];
+    // Someone looked at a private lane: its owner's business alone.
+    case 'seen': return e.branchId ? branchAudience(e.branchId) : null;
     case 'schedule.created': return branchAudience(e.schedule.branchId);
     case 'schedule.updated': return branchAudience((after.schedules?.[e.scheduleId] ?? before.schedules?.[e.scheduleId])?.branchId);
     case 'file.added': return e.file.turnId ? turnAudience(e.file.turnId) : branchAudience(e.file.branchId);
