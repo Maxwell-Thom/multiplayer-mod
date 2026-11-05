@@ -627,6 +627,13 @@ export function besideName(path: string, from: string, n = 1): string {
   return dot > 0 ? `${dirPart}${name.slice(0, dot)} (from ${who})${name.slice(dot)}` : `${dirPart}${name} (from ${who})`
 }
 
+/** The file a copy beside it was named for ("notes (from Riley).txt" is notes.txt), or null. */
+export function besideOf(path: string): string | null {
+  const dirPart = path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : ''
+  const m = path.slice(dirPart.length).match(/^(.+?) \(from .+\)(\.[^.]*)?$/)
+  return m ? `${dirPart}${m[1]}${m[2] ?? ''}` : null
+}
+
 /**
  * Without git here: each file is written where it was, over the copy here only when that's the
  * one that left this computer untouched since (`sent`); otherwise beside it, under a name nothing
@@ -670,6 +677,15 @@ async function unpackPlain(sh: MoveShell, o: { folder: string; file: string; exp
     const idOf = async (p: string) => gitText(sh, ['hash-object', '--no-filters', '--', slash(`${o.folder}/${p}`)], tmp)
     let to = e.path
     const there = await here(e.path)
+    // A copy that went beside someone's file, coming back where that file is: it's that file,
+    // already here as it came, or updated where it is when it's the copy that left untouched since.
+    const was = there ? null : besideOf(e.path)
+    const wasHere = was ? await here(was) : null
+    if (was && wasHere) {
+      const now = await idOf(wasHere)
+      if (now === e.sha) { landed.push(wasHere); continue }
+      if (o.sent?.[was] && now === o.sent[was]) to = wasHere
+    }
     if (there) {
       const now = await idOf(there)
       if (now === e.sha) { landed.push(there); continue }
