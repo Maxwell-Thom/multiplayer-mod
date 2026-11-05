@@ -13,7 +13,7 @@
 import type { SessionRateLimit, TurnCompleteInput } from 'claude-code'
 
 import type { MultiplayerMemo, MultiplayerView } from '../types'
-import { StreamReader, childArgs, isClaudeProgram, isRefusal, keptUserSettings, newSessionId, type ResultUsage, type RunEvent, type SessionPlan } from './child.ts'
+import { StreamReader, childArgs, isClaudeProgram, isRefusal, keptUserSettings, newSessionId, turnSettings, type ResultUsage, type RunEvent, type SessionPlan } from './child.ts'
 import {
   HttpError, Wire, createSpace, health, joinSpace, logoutAccount, normalizeServer, pollDevice, redeemPair, startDevice, webLink,
   type DevicePoll, type DeviceStart, type Health, type StoredAccount, type StoredSession,
@@ -24,7 +24,7 @@ import * as M from './move.ts'
 import type { Command } from './lib/commands.ts'
 import { type FolderView, buildSessionTurn, parseReplies } from './lib/context.ts'
 import type { FilesAction, FilesReport, LocalAction, LocalReport, LocalSession, SpaceEvent } from './lib/events.ts'
-import { type AskQuestion, clip, fileType, fmtSize, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName, workWhere } from './lib/helpers.ts'
+import { type AskQuestion, autoModeOk, clip, creditsRefusalFor, usesCredits, fastOk, fileType, fmtSize, historyTurns, isActive, isMain, isModelName, isOneOff, mainOf, memberName, modelLabel, resolveEffort, workWhere } from './lib/helpers.ts'
 import { type ParsedSession, chunkTurns, parseSession, transcriptPath } from './transcript.ts'
 import { apply } from './lib/reduce.ts'
 import { insideFolder, privateSource, privateStepText } from './lib/privacy.ts'
@@ -56,6 +56,10 @@ const STORE_BRANCHES_BY_FOLDER = 'branchSessionsByFolder'
 const SESSION_MAX_BYTES = 4 * 1024 * 1024
 /** This Claude Code's account sign-ins, one per server (from /multiplayer login). */
 const STORE_ACCOUNTS = 'accounts'
+/** Which of Claude Code's model families this person's plan runs, checked at most once a day. */
+const STORE_MODELS = 'models'
+const MODELS_FOR_MS = 24 * 60 * 60 * 1000
+const MODEL_FAMILIES = ['fable', 'opus', 'sonnet', 'haiku']
 /** Claude Code sessions brought into spaces: session id → where they went (newest last). */
 const STORE_BROUGHT = 'brought'
 type Brought = { sessionId: string; spaceId: string; conversationId: string; at: number }
@@ -99,6 +103,14 @@ export type BranchSession = { id: string; through: string | null; at: Record<str
 type Pending = { requestId: string; tool: string; title: string; always?: string; questions?: AskQuestion[]; i: number | undefined }
 
 /** The shared turn this runner is running (one at a time). */
+/** runner.done's fast and notices: fast mode as it ran (a notice that it turned off means it didn't). */
+function ranWith(a: Pick<Active, 'fast' | 'notices' | 'fastState' | 'suggestion'>): { fast?: boolean; notices?: string[]; suggestion?: string } {
+  const notices = a.notices ?? []
+  // The result says whether fast mode ran; a notice that it turned off says it too.
+  const off = a.fastState === 'off' || notices.some((n) => /fast mode/i.test(n) && /disabled|turned off|unavailable|exhausted|not available/i.test(n))
+  return { ...(a.fast !== undefined ? { fast: a.fast && !off } : {}), ...(notices.length ? { notices } : {}), ...(a.suggestion ? { suggestion: a.suggestion } : {}) }
+}
+
 export type Active = {
   turnId: string
   branchId: string
@@ -109,6 +121,16 @@ export type Active = {
   private: boolean
   /** The model named in runner.start, then the one the session reports. */
   model: string
+  /** The effort level its session runs at (for runner.done). */
+  effort?: string
+  /** Fast mode: true when its session asked for it, false when the pin did and it runs at standard speed. */
+  fast?: boolean
+  /** What Claude Code said about the session (runner.done's notices). */
+  notices?: string[]
+  /** Whether fast mode ran, as its result says ('on', 'off'). */
+  fastState?: string
+  /** Claude Code's guess at the next prompt. */
+  suggestion?: string
   /** Text so far, the block streaming now included. */
   live: string
   steps: number
@@ -258,6 +280,8 @@ export class Runner {
   home = ''
   lastBranchId: string | null = null
   modelOk = new Map<string, boolean>()
+  /** The commands and skills this Claude Code's turn sessions have, for its person's "/" menu. */
+  commands: string[] | undefined
   /** A branch session here can sign in (checked once it's true; rechecked while it isn't). */
   childOk = false
   /** Claude Code's own program, once found. */
@@ -572,6 +596,39 @@ export class Runner {
     const tools = await this.bridgeTools()
     if (w !== this.wire) return
     await w.hello(info, this.active ? [this.active.turnId] : [], tools)
+    if (!info.models) void this.checkModels()
+  }
+
+  /** A session said which commands and skills it has: its person's "/" menu lists them (said again when they change). */
+  private noteCommands(list: string[]): void {
+    const next = [...new Set(list.map((c) => c.replace(/^\//, '')).filter((c) => /^[A-Za-z0-9][A-Za-z0-9:._-]{0,99}$/.test(c)))].sort().slice(0, 300)
+    if (this.commands && this.commands.join('\n') === next.join('\n')) return
+    this.commands = next
+    if (this.phase === 'online') void soft(() => this.hello())
+  }
+
+  /** The families this plan runs, as last checked, while that's under a day old. */
+  private async knownModels(): Promise<string[] | undefined> {
+    const got = (await soft(() => this.io.storeGet(STORE_MODELS))) as { at?: number; models?: unknown } | undefined
+    return got && typeof got.at === 'number' && Date.now() - got.at < MODELS_FOR_MS && Array.isArray(got.models) ? got.models.filter((m): m is string => typeof m === 'string') : undefined
+  }
+
+  private checkingModels = false
+  /**
+   * Checks which families the plan runs (a one-token call each), keeps the answer for a day,
+   * and says hello again with it, so the web app knows before anyone sends.
+   */
+  private async checkModels(): Promise<void> {
+    if (this.checkingModels) return
+    this.checkingModels = true
+    try {
+      const models: string[] = []
+      for (const m of MODEL_FAMILIES) if (await this.modelAvailable(m)) models.push(m)
+      await soft(() => this.io.storeSet(STORE_MODELS, { at: Date.now(), models }))
+      if (this.phase === 'online') await soft(() => this.hello())
+    } finally {
+      this.checkingModels = false
+    }
   }
 
   /**
@@ -677,7 +734,8 @@ export class Runner {
       : undefined
     // The project's fingerprint, for the server's check before work moves here (shown to nobody).
     const repo = this.session ? await soft(() => G.repoPrint(io, this.session!.spaceId)) : undefined
-    return { kind: 'claude-code', version, model, cwd, git, sandbox, paused: this.paused, focus, ...(repo ? { repo } : {}), ...(this.heldBusy ? { busy: true } : {}) }
+    const models = await this.knownModels()
+    return { kind: 'claude-code', version, model, cwd, git, sandbox, paused: this.paused, focus, ...(repo ? { repo } : {}), ...(models ? { models } : {}), ...(this.commands ? { commands: this.commands } : {}), ...(this.heldBusy ? { busy: true } : {}) }
   }
 
   /** Tells the server whether a shared turn is waiting for the person's own prompt here. */
@@ -1202,12 +1260,26 @@ export class Runner {
     const room = this.room
     const s0 = this.state
     const branch = s0.branches[t.branchId]
+    // Fable bills this person's usage credits without asking: only with their yes, checked against
+    // the pin this session runs on (it may have changed since the turn was sent).
+    // Default is this Claude Code's own model: checked as that, and run as that.
+    const pinName = branch?.model.name.trim() ?? ''
+    const isDefault = !pinName || /^default(\[1m\])?$/i.test(pinName)
+    const runsOn = isDefault ? ((await soft(() => io.model())) ?? '') : pinName
+    const credits = !branch ? null
+      : isDefault && !runsOn && t.senderId !== this.me ? `${memberName(s0, this.me)}’s Claude Code couldn’t say which model it runs, so a turn on Default may bill its usage credits.`
+      : creditsRefusalFor(s0, runsOn, this.me, t.senderId)
+    if (credits) {
+      await soft(() => w.command({ type: 'runner.fail', turnId: t!.id, failure: { reason: 'credits', detail: credits } }))
+      io.toast(`Multiplayer: ${this.label(t)} would run on ${modelLabel(runsOn)}, which bills your usage credits, so it didn’t run here.`)
+      return this.drop(t.id)
+    }
     const exe = await this.findProgram()
     if (!exe) {
       await w.command({ type: 'runner.fail', turnId: t.id, failure: { reason: 'error', detail: NO_PROGRAM } })
       return this.drop(t.id)
     }
-    const started = await w.command({ type: 'runner.start', turnId: t.id, model: branch?.model.name || undefined })
+    const started = await w.command({ type: 'runner.start', turnId: t.id, model: runsOn || undefined })
     const token = (started as CommandResponse & { turnToken?: string }).turnToken
     if (room !== this.room) {
       // It moved to another space (or out of this one) while the turn was starting.
@@ -1223,7 +1295,7 @@ export class Runner {
     // Signed in to the same space again meanwhile, its state may be on its way back.
     const s = this.state ?? s0
     const a = this.blankActive(t.id, t.branchId, w, sess.spaceId)
-    Object.assign(a, { label: this.label(t), mode: t.mode, parts: t.parts.length, private: !!t.private, model: branch.model.name })
+    Object.assign(a, { label: this.label(t), mode: t.mode, parts: t.parts.length, private: !!t.private, model: runsOn })
     this.active = a
     this.lastBranchId = t.branchId
     await this.saveMemo()
@@ -1238,7 +1310,8 @@ export class Runner {
     // in a throwaway fork of the asker's session of the branch: the same instructions and tools, so it
     // reads the branch from the prompt cache. Neither is kept.
     const oneOff = isOneOff(t)
-    const aside = t.mode === 'aside'
+    // /context reports on the asker's own session of the branch, as a side question does: on a fork.
+    const aside = t.mode === 'aside' || t.mode === 'context'
     let { plan, held } = t.mode === 'recap' ? { plan: { kind: 'new', id: newSessionId() } as SessionPlan, held: { id: '', through: null, at: {} } as BranchSession } : this.sessionPlan(s, branch, await this.branchSessions(), sess.spaceId)
     if (aside && plan.kind === 'resume') plan = { kind: 'fork', from: plan.id }
     const st = buildSessionTurn(s, t, { heldThrough: held.through, lastState: held.state, folder })
@@ -1252,20 +1325,55 @@ export class Runner {
     // accepted for that turn) carries over: plan mode for a plan turn; otherwise the person's own
     // default (default, acceptEdits or auto; never bypass), or plain default where the project's
     // setup is used.
-    const settings = (await soft(() => io.userSettings())) as { permissions?: { defaultMode?: unknown } } | undefined
+    const settings = (await soft(() => io.userSettings())) as { permissions?: { defaultMode?: unknown }; maxEffortLevel?: unknown; advisorModel?: unknown; promptSuggestionEnabled?: unknown } | undefined
     const ownMode = settings?.permissions?.defaultMode
-    const baseMode = !projectSetup && (ownMode === 'acceptEdits' || ownMode === 'auto') ? ownMode : 'default' as const
+    // The mode this person picked in Multiplayer for turns here (their computer, their choice, even
+    // under the project's setup), or, left to their Claude Code, its own default as above.
+    const picked = s.members[this.me]?.prefs?.mode
+    const chosen = picked && picked !== 'own' ? picked : !projectSetup && (ownMode === 'acceptEdits' || ownMode === 'auto') ? ownMode : 'default' as const
+    // Auto runs only on some models: elsewhere the turn asks first, and says so.
+    const autoFell = chosen === 'auto' && !autoModeOk(runsOn)
+    const baseMode = autoFell ? 'default' as const : chosen
     const permissionMode = t.plan ? 'plan' as const : baseMode
+    // The level that runs, as Claude Code settles it: Default is the model's own level, sent as
+    // that level (so no runner's saved effort changes it); this person's cap and Claude Code's
+    // effort variable win over the pin, and the turn says what ran.
+    const effort = resolveEffort(runsOn, branch.model.effort, {
+      max: typeof settings?.maxEffortLevel === 'string' ? settings.maxEffortLevel : undefined,
+      env: (await soft(() => io.effortEnv())) ?? undefined,
+    }) ?? undefined
+    a.effort = effort
+    // Fast mode bills this person's usage credits too: their own turns unless they turned that off,
+    // others' only when they allow everyone's. Without that, it runs at standard speed and says so.
+    const allows = s.members[this.me]?.prefs?.credits ?? 'mine'
+    const mayFast = t.senderId === this.me ? allows !== 'off' : allows === 'everyone'
+    const fastYes = !!branch.model.fast && fastOk(runsOn) && mayFast
+    if (branch.model.fast) a.fast = fastYes
+    a.notices = autoFell ? [`Auto isn’t available on ${modelLabel(runsOn)}, so it asked first.`] : []
+    // An advisor or fallback that bills usage credits needs the same yes; without it, it's left out.
+    const leftOut = (what: string, m: string) => `${what === 'advice' ? `${modelLabel(m)}’s advice` : `${modelLabel(m)} to fall back on`} was left out: it may bill ${memberName(s, this.me)}’s usage credits.`
+    const pinAdvisor = branch.model.advisor
+    if (!mayFast && pinAdvisor && pinAdvisor !== 'off' && usesCredits({ name: pinAdvisor })) a.notices.push(leftOut('advice', pinAdvisor))
+    const fallback = branch.model.fallback && (mayFast || !usesCredits({ name: branch.model.fallback })) ? branch.model.fallback : undefined
+    if (branch.model.fallback && !fallback) a.notices.push(leftOut('fallback', branch.model.fallback))
     const argv = [exe, ...childArgs({
-      plan, permissionMode, model: branch.model.name || undefined, effort: branch.model.effort, system: st.system, name,
+      plan, permissionMode, model: runsOn || undefined, effort, system: st.system, name,
       mcpUrl: `${normalizeServer(sess.server)}/mcp/turn/${sess.spaceId}/${token}`,
       sites: personal ? [] : s.space.policy.sites, pluginDir: io.pluginRoot || undefined, persist: !oneOff, projectSetup,
       keep: projectSetup ? keptUserSettings(await soft(() => io.userSettings())) : undefined,
+      settings: turnSettings(branch.model, { credits: mayFast, ownAdvisor: typeof settings?.advisorModel === 'string' ? settings.advisorModel : undefined }),
+      fallback,
+      // Someone else's turn spends at most what this person allows (none on their own).
+      budgetUsd: t.senderId !== this.me ? s.members[this.me]?.prefs?.budget : undefined,
+      // A guess at the next prompt, unless this person turned Claude Code's off (not for one-offs).
+      suggestions: !oneOff && settings?.promptSuggestionEnabled !== false,
     })]
     const env: Record<string, string> = {
       MULTIPLAYER_CHILD: personal ? 'private' : 'shared',
       // A turn others read: its session checks what its person shares here before a private call.
       ...(t.private ? {} : { MULTIPLAYER_SHARED_URL: `${normalizeServer(sess.server)}/mcp/turn/${sess.spaceId}/${token}/shared` }),
+      // Where its session takes what people add while Claude works (each once).
+      MULTIPLAYER_STEER_URL: `${normalizeServer(sess.server)}/mcp/turn/${sess.spaceId}/${token}/steers`,
       // Questions wait for a person; sessions this mod starts keep their transcripts.
       MCP_TOOL_TIMEOUT: '900000',
       CLAUDE_CODE_FORCE_SESSION_PERSISTENCE: '1',
@@ -1294,13 +1402,15 @@ export class Runner {
         if (n.done) break
         if (n.value.stream === 'stderr') { errText = (errText + n.value.text).slice(-4000); continue }
         for (const ev of reader.push(n.value.text)) {
-          if (ev.kind === 'init') { if (ev.sessionId) sessionId = ev.sessionId; if (ev.model) a.model = ev.model }
+          if (ev.kind === 'init') { if (ev.sessionId) sessionId = ev.sessionId; if (ev.model) a.model = ev.model; if (ev.commands) this.noteCommands(ev.commands) }
+          else if (ev.kind === 'notice') { if (a.notices && a.notices.length < 5 && !a.notices.includes(ev.text)) a.notices.push(ev.text) }
           else if (ev.kind === 'text') { a.live = ev.text; this.scheduleDelta(a) }
           else if (ev.kind === 'tool') this.beginStep(a, ev.id, ev.name, ev.input, ev.parent)
           else if (ev.kind === 'tool-result') this.endStep(a, ev.id, ev.isError ? (isRefusal(ev.text) ? 'denied' : 'fail') : 'done')
           else if (ev.kind === 'message') { lastUuid = ev.uuid; if (ev.model) a.model = ev.model }
           else if (ev.kind === 'rate') { if (ev.status === 'rejected') rate = ev }
-          else if (ev.kind === 'result') result = ev
+          else if (ev.kind === 'result') { result = ev; if (ev.fastState) a.fastState = ev.fastState }
+          else if (ev.kind === 'suggestion') a.suggestion = ev.text
         }
         if (a.stopped) break
       }
@@ -1337,10 +1447,10 @@ export class Runner {
       const answer = (text || result?.text || '').trim()
       if (!w || a.stopped === 'takeover' || a.stopped === 'gone' || a.stopped === 'left') return
       if (a.stopped === 'server') {
-        await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, model }, w)
+        await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, model, ...(a.effort ? { effort: a.effort } : {}), ...ranWith(a) }, w)
       } else if (result && !result.isError) {
         const replies = a.mode === 'reveal' ? parseReplies(answer, a.parts) : undefined
-        await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, usage: usageOf(result.usage), model, replies, ...(thinking.trim() ? { thinking: thinking.slice(0, 100_000) } : {}) }, w)
+        await this.finishCommand({ type: 'runner.done', turnId: a.turnId, text: answer, usage: usageOf(result.usage), model, replies, ...(a.effort ? { effort: a.effort } : {}), ...ranWith(a), ...(thinking.trim() ? { thinking: thinking.slice(0, 100_000) } : {}) }, w)
       } else {
         const failure = await this.classifyFailure(result, rate, errText)
         await this.finishCommand({ type: 'runner.fail', turnId: a.turnId, failure }, w)

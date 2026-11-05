@@ -47,6 +47,17 @@ export interface Space {
   endedBy?: MemberId;
 }
 
+/**
+ * A person's own choices about their Claude Code: how turns there start (`own`: as their own
+ * settings say), whose turns may use their usage credits (Fable, fast mode; unset is `mine`),
+ * and what one of someone else's turns may spend there, in dollars (0 or unset: no cap).
+ */
+export interface MemberPrefs {
+  mode?: 'own' | 'default' | 'acceptEdits' | 'auto';
+  credits?: 'off' | 'mine' | 'everyone';
+  budget?: number;
+}
+
 export interface Member {
   id: MemberId;
   name: string;
@@ -57,6 +68,8 @@ export interface Member {
   leftAt?: number;
   /** Notification preference. */
   notify: 'needed' | 'all' | 'off';
+  /** Their own choices about their Claude Code (the budget only they see). */
+  prefs?: MemberPrefs;
   /** Set when the member's plan declined a turn: until when, if the runner knew. */
   limit?: { at: number; until?: number } | null;
 }
@@ -74,9 +87,25 @@ export interface Conversation {
   allowed?: Record<MemberId, MemberId[]>;
 }
 
+/** How hard Claude thinks: Claude Code's five levels, or `auto` for the model's own default. */
+export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
+
+/** Claude Code's built-in output styles (`default` sets it plainly, over a runner's own). */
+export type OutputStyle = 'default' | 'Concise' | 'Explanatory' | 'Proactive' | 'Learning';
+
 export interface ModelPin {
   name: string;
-  effort: 'low' | 'medium' | 'high';
+  effort: Effort;
+  /** Fast mode (Opus 5.5, Opus 5 and Opus 4.8): it bills its runner's usage credits, so only with their yes. */
+  fast?: boolean;
+  /** How answers are written. Unset: as its Claude Code has it. Learning only on a private lane. */
+  style?: OutputStyle;
+  /** A model Claude asks for advice, or 'off'. Unset: as its Claude Code has it. */
+  advisor?: string;
+  /** Thinking turned off, where the model allows it. */
+  thinking?: false;
+  /** The model to run on when this one is overloaded. */
+  fallback?: string;
   setBy: MemberId;
   at: number;
 }
@@ -179,6 +208,8 @@ export type TurnMode =
   | 'merge-note'   // writes the merge note into main
   | 'recap'        // "since you left" recap, private to the asker
   | 'aside'        // a side question on a branch, private to the asker (Claude Code's /btw)
+  | 'compact'      // /compact on the branch's session, for everyone
+  | 'context'      // /context on the asker's session of the branch, private to them
   | 'combine';     // combine two conflicting file changes
 
 export type TurnStatus =
@@ -211,9 +242,17 @@ export interface Usage {
 }
 
 export interface TurnFailure {
-  reason: 'error' | 'limit' | 'refusal' | 'model-unavailable' | 'runner-offline' | 'not-connected' | 'not-signed-in';
+  reason: 'error' | 'limit' | 'refusal' | 'model-unavailable' | 'credits' | 'runner-offline' | 'not-connected' | 'not-signed-in';
   detail?: string;
   resetsAt?: number;
+}
+
+/** Something someone added while Claude worked on a turn (as Claude Code's queued messages). */
+export interface Steer {
+  n: number;
+  by: MemberId;
+  text: string;
+  at: number;
 }
 
 export interface Turn {
@@ -245,6 +284,20 @@ export interface Turn {
   text: string;
   usage?: Usage;
   model?: string;
+  /** The effort level that ran (it can differ from the pin: a model's levels, a runner's cap). */
+  effort?: string;
+  /** Whether it ran in fast mode: false when the pin asked for it and it ran at standard speed. */
+  fast?: boolean;
+  /** What Claude Code said about the session as it ran (fast mode turned off, and the like). */
+  notices?: string[];
+  /** What people added while Claude worked, in order. */
+  steers?: Steer[];
+  /** Sent as research: Claude Code's /deep-research, many searches. */
+  research?: boolean;
+  /** Claude Code's guess at the next prompt, after the turn (its prompt suggestions). */
+  suggestion?: string;
+  /** The last steer its session read (as a tool call finished); the rest go with the next prompt. */
+  steersTaken?: number;
   failure?: TurnFailure;
   conflict?: { summary: string; conflicting: number[]; options: { key: string; label: string; memberId?: MemberId }[] };
   /** Set once people settled a conflict, so the runner doesn't check again. */
@@ -520,6 +573,8 @@ export interface RunnerInfo {
   version?: string;
   model?: string;
   models?: string[];
+  /** The commands and skills its sessions have, for "/" (its person only). */
+  commands?: string[];
   account?: string;
   cwd?: string;
   git?: { repo?: string; branch?: string; dirty?: boolean };

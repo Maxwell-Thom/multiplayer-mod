@@ -51,6 +51,8 @@ export type Port = {
    * the same one). Claude Code sets it for the processes it starts, so here it's usually unset.
    */
   execPath: () => Promise<string | undefined>
+  /** CLAUDE_CODE_EFFORT_LEVEL in this session's environment: it beats any --effort, as in Claude Code. */
+  effortEnv: () => Promise<string | undefined>
   /** Windows' own folder (SystemRoot), for its command shell by absolute path. */
   systemRoot: () => Promise<string | undefined>
   /** The person's user-level settings alone (~/.claude/settings.json), as loaded. */

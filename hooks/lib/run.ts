@@ -52,7 +52,7 @@ export function genesis(o: NewSpace): Applied {
   const mainId = o.id('b');
   const main: Branch = {
     id: mainId, conversationId, name: 'Main', ownerId: null, parentId: null, forkTurnId: null, private: false, state: 'active',
-    model: { name: o.model || 'opus', effort: 'high', setBy: host.id, at: o.now }, createdAt: o.now,
+    model: { name: o.model || 'opus', effort: 'auto', setBy: host.id, at: o.now }, createdAt: o.now,
   };
   const bodies: EventBody[] = [
     { type: 'space.created', space: { id: o.spaceId, name: o.name, code: o.code, hostId: host.id, policy: { ...DEFAULT_POLICY, ...o.policy }, createdAt: o.now }, host },

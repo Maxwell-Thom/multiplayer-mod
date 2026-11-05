@@ -63,6 +63,8 @@ export const register: Register = (on, options) => {
   const BACKGROUND = new Set(['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Monitor', 'RemoteTrigger'])
   /** In a shared turn's session: where to ask what its person shares in this space (docs/PRIVACY.md). */
   let sharedUrl = ''
+  /** In a shared turn's session: where to take what people added while Claude works. */
+  let steerUrl = ''
 
   on('tool.check', async ($, e, next) => {
     const r = await next(e)
@@ -87,12 +89,30 @@ export const register: Register = (on, options) => {
     return r
   })
 
+  // What people added while Claude works reaches it as soon as a tool call on its main loop
+  // finishes, within the same turn, as Claude Code's queued messages do. Never in a subagent's
+  // loop (the subagent would read it, not Claude). A slow or failed check leaves the result as it
+  // was: what wasn't read goes with the next prompt.
+  on('tool.call', async ($, e, next) => {
+    const r = await next(e)
+    if (r.deny !== undefined || !child || !steerUrl || e.agentId) return r
+    const got = await withTimeout($, $.http.fetch(steerUrl, { method: 'POST' }), 2000).catch(() => null)
+    let steers: { by: string; text: string }[] = []
+    try {
+      const b = got && got.ok ? (JSON.parse(got.text) as { steers?: unknown }) : null
+      if (Array.isArray(b?.steers)) steers = (b.steers as { by?: unknown; text?: unknown }[]).filter((x): x is { by: string; text: string } => typeof x?.by === 'string' && typeof x?.text === 'string' && !!x.text.trim())
+    } catch { steers = [] }
+    if (!steers.length) return r
+    return { ...r, context: [...(r.context ?? []), ...steers.map((x) => `${x.by} adds, while you work:\n\n${x.text}`)] }
+  })
+
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     const role = await $.env.get('MULTIPLAYER_CHILD')
     if (role) {
       child = role === 'private' ? 'private' : 'shared'
       sharedUrl = (await $.env.get('MULTIPLAYER_SHARED_URL')) ?? ''
+      steerUrl = (await $.env.get('MULTIPLAYER_STEER_URL')) ?? ''
       return started
     }
     // Everything the runner does on the engine, each spelled as a call on `$`.
@@ -123,6 +143,7 @@ export const register: Register = (on, options) => {
       home: async () => (await $.env.get('HOME')) ?? (await $.env.get('USERPROFILE')),
       userName: async () => (await $.env.get('USER')) ?? (await $.env.get('USERNAME')),
       execPath: () => $.env.get('CLAUDE_CODE_EXECPATH'),
+      effortEnv: () => $.env.get('CLAUDE_CODE_EFFORT_LEVEL'),
       systemRoot: () => $.env.get('SystemRoot'),
       userSettings: () => $.settings.read({ source: 'user' }),
       pluginRoot: $.plugin.root,

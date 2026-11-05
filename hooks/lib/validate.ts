@@ -24,6 +24,7 @@ export const IMPORT_STEPS = 300;
 const SPECS: Record<Command['type'], Spec> = {
   'member.rename': { name: 'str:80' },
   'member.notify': { notify: 'enum:needed|all|off' },
+  'member.prefs': { mode: 'enum:own|default|acceptEdits|auto?', credits: 'enum:off|mine|everyone?', budget: 'num?' },
   'sharing.set': { source: 'str:200', name: 'str:100', on: 'bool' },
   'member.role': { memberId: 'id', role: 'enum:host|prompter|viewer' },
   'member.leave': { handTo: 'id?', end: 'bool?' },
@@ -36,13 +37,14 @@ const SPECS: Record<Command['type'], Spec> = {
   'branch.fork': { fromBranchId: 'id', atTurnId: 'id?', private: 'bool?', name: 'str:80?', editOf: 'id?', editText: `${TEXT}?`, editParts: 'any?', inMine: 'bool?' },
   'branch.state': { branchId: 'id', state: 'enum:parked|active' },
   'branch.rename': { branchId: 'id', name: 'str:80' },
-  'branch.model': { branchId: 'id', name: 'str:100', effort: 'enum:low|medium|high' },
+  'branch.model': { branchId: 'id', name: 'str:100', effort: 'str:10', fast: 'bool?', style: 'enum:default|Concise|Explanatory|Proactive|Learning?', advisor: 'str:100?', thinking: 'bool?', fallback: 'str:100?' },
   'branch.import': { branchId: 'id', source: 'obj', turns: 'any', model: 'str:100?' },
   'part.add': { branchId: 'id', text: TEXT, position: 'bool?', id: 'id?', cites: 'id?', files: 'any?' },
   'part.remove': { partId: 'id' },
-  'turn.send': { branchId: 'id', mode: 'enum:normal|view-first?', handoffId: 'id?', plan: 'bool?', runIn: 'id?' },
+  'turn.send': { branchId: 'id', mode: 'enum:normal|view-first|compact|context?', text: 'str:4000?', handoffId: 'id?', plan: 'bool?', research: 'bool?', runIn: 'id?' },
   'turn.resolve': { turnId: 'id', pick: 'str:80' },
   'turn.stop': { turnId: 'id' },
+  'turn.steer': { turnId: 'id', text: TEXT },
   'turn.takeover': { turnId: 'id' },
   'turn.retry': { turnId: 'id' },
   'turn.reveal': { turnId: 'id' },
@@ -72,7 +74,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'runner.step': { turnId: 'id', step: 'obj' },
   'runner.approval': { turnId: 'id', waiting: 'bool', sharing: 'bool?' },
   'runner.text': { turnId: 'id', text: 'str:200000' },
-  'runner.done': { turnId: 'id', text: 'str:200000', usage: 'obj?', model: 'str:100?', replies: 'any?', thinking: 'str:100000?' },
+  'runner.done': { turnId: 'id', text: 'str:200000', usage: 'obj?', model: 'str:100?', effort: 'enum:low|medium|high|xhigh|max?', fast: 'bool?', notices: 'any?', suggestion: 'str:2000?', replies: 'any?', thinking: 'str:100000?' },
   'runner.fail': { turnId: 'id', failure: 'obj' },
   'runner.decision': { turnId: 'id', text: 'str:2000', replaces: 'id?' },
   'runner.question': { turnId: 'id', text: 'str:2000' },
@@ -87,6 +89,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'server.pause': { turnId: 'id' },
   'server.resume': { turnId: 'id' },
   'server.note': { turnId: 'id', text: 'str:200000' },
+  'server.steers-taken': { turnId: 'id', through: 'num' },
   'server.file': { file: 'obj' },
   'server.schedule-fire': { scheduleId: 'id' },
   'runner.schedule': { turnId: 'id', prompt: 'str:4000', inMs: 'num?', everyMs: 'num?', times: 'num?' },
@@ -132,12 +135,13 @@ export function invalid(cmd: unknown): string | null {
   }
   if (cmd.type === 'runner.fail') {
     const f = c.failure as Record<string, unknown>;
-    if (!['error', 'limit', 'refusal', 'model-unavailable', 'runner-offline', 'not-connected', 'not-signed-in'].includes(f.reason as string)) return 'Bad failure.';
+    if (!['error', 'limit', 'refusal', 'model-unavailable', 'credits', 'runner-offline', 'not-connected', 'not-signed-in'].includes(f.reason as string)) return 'Bad failure.';
     if (f.detail !== undefined && (typeof f.detail !== 'string' || f.detail.length > 2000)) return 'Bad failure.';
     if (f.resetsAt !== undefined && typeof f.resetsAt !== 'number') return 'Bad failure.';
   }
   if (cmd.type === 'branch.fork' && c.editParts !== undefined && (!Array.isArray(c.editParts) || c.editParts.length > 50
     || !c.editParts.every((p) => isObj(p) && isId(p.memberId) && typeof p.text === 'string' && p.text.length <= 20000))) return 'Bad edit.';
+  if (cmd.type === 'runner.done' && c.notices !== undefined && (!Array.isArray(c.notices) || c.notices.length > 5 || c.notices.some((n) => typeof n !== 'string' || !n.trim() || n.length > 300 || CONTROL.test(n)))) return 'Bad notices.';
   if (cmd.type === 'runner.done' && c.replies !== undefined && (!Array.isArray(c.replies) || c.replies.length > 50 || c.replies.some((r) => typeof r !== 'string' || r.length > 4000))) return 'Bad replies.';
   if (cmd.type === 'runner.check') {
     const k = c.conflict as Record<string, unknown>;

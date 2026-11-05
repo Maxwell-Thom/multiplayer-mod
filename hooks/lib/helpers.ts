@@ -1,5 +1,5 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import type { Ask, Branch, Decision, Id, ImportTurn, MemberId, Note, Question, SpaceState, Turn, TurnWork } from './types.ts';
+import type { Ask, Branch, Decision, Effort, Id, ModelPin, ImportTurn, MemberId, Note, Question, SpaceState, Turn, TurnWork } from './types.ts';
 
 export const ACTIVE_STATUSES: Turn['status'][] = ['requested', 'held', 'conflict', 'running', 'approval', 'paused'];
 
@@ -66,7 +66,7 @@ export function branchRunner(s: SpaceState, branchId: Id): MemberId | null {
 }
 
 export function isOneOff(t: Turn): boolean {
-  return t.mode === 'recap' || t.mode === 'aside';
+  return t.mode === 'recap' || t.mode === 'aside' || t.mode === 'context';
 }
 
 /** How a branch session reads a note someone shared. */
@@ -190,13 +190,191 @@ export function activeMembers(s: SpaceState): MemberId[] {
   return Object.values(s.members).filter((m) => !m.leftAt).map((m) => m.id);
 }
 
-/** "Opus", "Sonnet 4.5", … from an alias or a full model id. */
+/**
+ * "Opus", "Sonnet 4.5", "Fable 5.1", "Opus · 1M", "Opus plan", "Best available", from an alias
+ * or a full model id. No name is "Default": the model the Claude Code it runs in would pick.
+ */
 export function modelLabel(name: string | undefined): string {
-  if (!name) return 'Model';
-  const n = name.toLowerCase();
-  const fam = n.includes('opus') ? 'Opus' : n.includes('sonnet') ? 'Sonnet' : n.includes('haiku') ? 'Haiku' : name;
-  const m = n.match(/(\d+)[-.](\d+)/);
-  return m && fam !== name ? `${fam} ${m[1]}.${m[2]}` : fam;
+  if (!name || /^default$/i.test(name)) return 'Default';
+  const oneM = /\[1m\]$/i.test(name) ? ' · 1M' : '';
+  const n = name.toLowerCase().replace(/\[1m\]$/, '');
+  if (n === 'best') return 'Best available';
+  if (n === 'opusplan') return `Opus plan${oneM}`;
+  const fam = n.includes('fable') ? 'Fable' : n.includes('opus') ? 'Opus' : n.includes('sonnet') ? 'Sonnet' : n.includes('haiku') ? 'Haiku' : null;
+  if (!fam) return name;
+  const v = n.match(/(?:fable|opus|sonnet|haiku)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/);
+  if (v) return `${fam} ${v[1]}${v[2] ? `.${v[2]}` : ''}${oneM}`;
+  // The older ids put the version first: claude-3-5-sonnet.
+  const old = n.match(/(\d+)[-.](\d+)/);
+  return `${old ? `${fam} ${old[1]}.${old[2]}` : fam}${oneM}`;
+}
+
+/**
+ * Why `actor` can't add to turn `t` while Claude works: it takes the standing that sending there
+ * without asking does (its runner, or someone it lets send there, past a branch owner's yes), never
+ * just having sent it (a yes to one prompt is a yes to that prompt), and only once it may run.
+ */
+export function steerRefusal(s: SpaceState, t: Turn | undefined, actor: MemberId): string | null {
+  if (!t) return 'No such turn.';
+  if (t.status === 'held' || t.status === 'conflict') return 'That turn is still waiting for a yes. Add it to the next prompt.';
+  if (!isActive(t)) return 'That turn has finished. Add it to the next prompt.';
+  if (actor === t.runnerId) return null;
+  const b = s.branches[t.branchId];
+  if (!b || b.private || t.private) return 'Only its person can add to a private turn.';
+  if (!mayRunFor(s, t.conversationId, t.runnerId, actor)) return `Only people ${memberName(s, t.runnerId)} lets send here can add to a running turn.`;
+  // (The same as sending there: a branch owner's yes is asked for each turn, even in their own Claude Code.)
+  if (b.ownerId && b.ownerId !== actor && s.space.policy.ownerOk && !s.members[b.ownerId]?.leftAt) return `${memberName(s, b.ownerId)} says yes first on this branch, so add it to the next prompt.`;
+  return null;
+}
+
+const REFUSED: Record<string, string> = {
+  clear: '/clear would empty this conversation’s session for everyone, so it isn’t available here.',
+  config: '/config would change settings on the computer this runs on, so it isn’t available here. Pick the model and its settings for everyone from the model menu instead.',
+  login: '/login signs Claude Code in on its own computer, so it isn’t available here.',
+  logout: '/logout signs Claude Code out on its own computer, so it isn’t available here.',
+  rewind: '/rewind would change this conversation’s session for everyone. Edit an earlier turn to branch from it instead.',
+  resume: '/resume would swap this conversation’s session for another, so it isn’t available here.',
+  plugin: '/plugin installs things on the computer this runs on, so it isn’t available here.',
+  permissions: '/permissions changes rules on the computer this runs on, so it isn’t available here.',
+  hooks: '/hooks changes what runs on the computer this runs on, so it isn’t available here.',
+  mcp: '/mcp changes servers on the computer this runs on, so it isn’t available here.',
+};
+
+/** Why a part can't be one of Claude Code's own commands here (one that would change everyone's session, or someone's computer). */
+export function slashRefusal(text: string): string | null {
+  const m = text.trim().match(/^\/([a-z-]+)(?:\s|$)/i);
+  return m ? REFUSED[m[1].toLowerCase()] ?? null : null;
+}
+
+/** Where Claude Code's Auto mode runs: Opus and Sonnet 4.6 and newer, Haiku 5.5, Fable (and a model it can't tell). */
+export function autoModeOk(model: string): boolean {
+  const v = modelVersion(model);
+  if (!v) return true;
+  if (v.family === 'fable') return true;
+  if (v.family === 'haiku') return v.major > 5 || (v.major === 5 && v.minor >= 5);
+  return v.major > 4 || (v.major === 4 && v.minor >= 6);
+}
+
+/** Fast mode's models: Opus 5.5, Opus 5 and Opus 4.8 (and their 1M versions); not Opus plan, which builds on Sonnet. */
+export function fastOk(model: string): boolean {
+  if (/^opusplan/i.test(model)) return false;
+  const v = modelVersion(model);
+  return !!v && v.family === 'opus' && ((v.major === 5 && (v.minor === 5 || v.minor === 0)) || (v.major === 4 && v.minor === 8));
+}
+
+/** The output styles a branch can set for everyone (Learning only on a private lane). */
+export const STYLES = ['default', 'Concise', 'Explanatory', 'Proactive', 'Learning'] as const;
+
+/** Whether thinking can be turned off: only on Opus 4.6, Sonnet 4.6 and Opus 4.8 (the others always think). */
+export function thinkingToggles(model: string): boolean {
+  return /^claude-(opus-4-6|sonnet-4-6|opus-4-8)(\[1m\])?$/i.test(model.trim());
+}
+
+/** A pin in words, as its line says it: "Opus · Default (Medium) · fast · Concise · Fable advising". */
+export function pinText(pin: Pick<ModelPin, 'name' | 'effort'> & Partial<Pick<ModelPin, 'fast' | 'style' | 'advisor' | 'thinking' | 'fallback'>>): string {
+  return [
+    modelLabel(pin.name), effortLabel(pin.effort, pin.name), pin.fast ? 'fast' : '',
+    pin.style ? (pin.style === 'default' ? 'Default style' : pin.style) : '',
+    pin.advisor ? (pin.advisor === 'off' ? 'no advisor' : `${modelLabel(pin.advisor)} advising`) : '',
+    pin.thinking === false ? 'thinking off' : '', pin.fallback ? `falls back to ${modelLabel(pin.fallback)}` : '',
+  ].filter(Boolean).join(' · ');
+}
+
+/**
+ * Whether a turn may bill usage credits: fast mode, or any model but the ones known not to (Opus,
+ * Sonnet, Haiku and Opus plan), so Fable, Best available and anything unknown need a yes. Default
+ * is its runner's own choice: their Claude Code checks what that is before it runs.
+ */
+export function usesCredits(pin: { name: string; fast?: boolean }): boolean {
+  if (pin.fast) return true;
+  const n = pin.name.trim().toLowerCase().replace(/\[1m\]$/, '');
+  if (!n || n === 'default') return false;
+  return !(n === 'opusplan' || (/opus|sonnet|haiku/.test(n) && !n.includes('fable')));
+}
+
+/**
+ * Why a turn on `model` can't run in `runnerId`'s Claude Code for `senderId`: Fable bills usage
+ * credits without asking there, so it runs only with its runner's yes (their turns only, unless
+ * they allow everyone's; never, if they turned it off). Null when it may run. Fast mode isn't
+ * refused: without that yes it runs at standard speed.
+ */
+export function creditsRefusalFor(s: SpaceState, model: string, runnerId: MemberId, senderId: MemberId): string | null {
+  if (!usesCredits({ name: model })) return null;
+  const allows = s.members[runnerId]?.prefs?.credits ?? 'mine';
+  const what = /fable/i.test(model) ? 'Fable' : modelLabel(model);
+  if (runnerId === senderId) return allows === 'off' ? `${what} may bill your usage credits, and you’ve turned that off in Where it runs.` : null;
+  if (allows === 'everyone') return null;
+  const name = memberName(s, runnerId);
+  return allows === 'off' ? `${what} may bill ${name}’s usage credits, and ${name} has turned that off.` : `${what} may bill ${name}’s usage credits. ${name} allows that for their own turns only.`;
+}
+
+/** The same, for `senderId`'s next turn on a branch, where it would run now (for a warning before sending). */
+export function creditsRefusal(s: SpaceState, branchId: Id, senderId: MemberId): string | null {
+  const b = s.branches[branchId];
+  return b ? creditsRefusalFor(s, b.model.name, b.runnerId ?? senderId, senderId) : null;
+}
+
+/** Claude Code's effort levels, lowest first. */
+export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
+export type EffortLevel = (typeof EFFORTS)[number];
+
+/**
+ * A model's family and version from an alias or a full id: `opus`, `sonnet` and `haiku` are
+ * 5.5, `fable` and `best` Fable 5.1, `opusplan` Opus 5.5. Null when the model isn't known
+ * (Claude Code's own default, or a name with no version).
+ */
+function modelVersion(name: string): { family: string; major: number; minor: number } | null {
+  const n = name.toLowerCase().replace(/\[1m\]$/, '');
+  if (n === 'opus' || n === 'sonnet' || n === 'haiku') return { family: n, major: 5, minor: 5 };
+  if (n === 'opusplan') return { family: 'opus', major: 5, minor: 5 };
+  if (n === 'fable' || n === 'best') return { family: 'fable', major: 5, minor: 1 };
+  const m = n.match(/(opus|sonnet|haiku|fable)-(\d{1,2})(?:-(\d{1,2}))?(?!\d)/);
+  return m ? { family: m[1], major: Number(m[2]), minor: Number(m[3] ?? 0) } : null;
+}
+
+/** The effort levels a model has (Claude Code runs any other as the highest it has at or below). */
+export function effortsFor(model: string): EffortLevel[] {
+  const v = modelVersion(model);
+  if (!v) return model && !/^default$/i.test(model) ? [] : [...EFFORTS];
+  if (v.major >= 5 || (v.major === 4 && v.minor >= 7)) return [...EFFORTS];
+  if (v.major === 4 && v.minor === 6) return ['low', 'medium', 'high', 'max'];
+  return [];
+}
+
+/** The level a model runs at when nobody picks one: medium on the 5.5 models, xhigh on Opus 4.7, else high. */
+export function defaultEffort(model: string): EffortLevel | null {
+  const v = modelVersion(model);
+  if (!v || !effortsFor(model).length) return null;
+  if (v.family !== 'fable' && (v.major > 5 || (v.major === 5 && v.minor >= 5))) return 'medium';
+  if (v.family === 'opus' && v.major === 4 && v.minor === 7) return 'xhigh';
+  return 'high';
+}
+
+const EFFORT_NAMES: Record<EffortLevel, string> = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' };
+
+/** "Extra high", or "Default (Medium)" for the model's own level. */
+export function effortLabel(e: Effort, model?: string): string {
+  if (e !== 'auto') return EFFORT_NAMES[e] ?? e;
+  const d = model ? defaultEffort(model) : null;
+  return d ? `Default (${EFFORT_NAMES[d]})` : 'Default';
+}
+
+const isLevel = (v: unknown): v is EffortLevel => typeof v === 'string' && (EFFORTS as readonly string[]).includes(v);
+
+/**
+ * The level a turn runs at, as Claude Code settles it: its effort variable (`env`) over the pick,
+ * the model's default for `auto`, a runner's `maxEffortLevel` (`max`) as a cap, and the highest
+ * level the model has at or below. Null when the model has no levels, or its default isn't known.
+ */
+export function resolveEffort(model: string, e: Effort, caps: { max?: string; env?: string } = {}): EffortLevel | null {
+  const env = caps.env?.trim().toLowerCase();
+  const pick: Effort = isLevel(env) ? env : env === 'auto' || env === 'unset' ? 'auto' : e;
+  let level = pick === 'auto' ? defaultEffort(model) : isLevel(pick) ? pick : null;
+  const levels = effortsFor(model);
+  if (!level || !levels.length) return null;
+  if (isLevel(caps.max) && EFFORTS.indexOf(caps.max) < EFFORTS.indexOf(level)) level = caps.max;
+  const at = EFFORTS.indexOf(level);
+  return [...levels].reverse().find((l) => EFFORTS.indexOf(l) <= at) ?? levels[0];
 }
 
 /** Where a turn's file changes stand, from its work record. */

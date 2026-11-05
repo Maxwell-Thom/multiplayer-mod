@@ -6,7 +6,7 @@
 // its fork point ended on). The session asks permission through the turn's MCP
 // endpoint on the server (`--permission-prompt-tool`), and records decisions there.
 
-import { isModelName, isSite } from './lib/helpers.ts'
+import { isModelName, isSite, usesCredits } from './lib/helpers.ts'
 
 /** Where this turn's session comes from. */
 export type SessionPlan =
@@ -35,6 +35,14 @@ export type ChildOptions = {
   projectSetup?: boolean
   /** With projectSetup: what of the person's user settings stays anyway (see keptUserSettings). */
   keep?: Record<string, unknown>
+  /** What the branch's pin sets for its session (turnSettings), merged with `keep` into one --settings. */
+  settings?: Record<string, unknown>
+  /** The model to run on when the pinned one is overloaded. */
+  fallback?: string
+  /** What the turn may spend, in dollars (someone else's turn, capped by its runner). */
+  budgetUsd?: number
+  /** Claude Code's guess at the next prompt, after the turn (its prompt suggestions). */
+  suggestions?: boolean
   /**
    * The permission mode to start in: 'plan' for a plan turn (Claude plans first, and its plan
    * comes to the sender to approve); another to leave a plan the session was left in.
@@ -89,11 +97,16 @@ export function childArgs(o: ChildOptions): string[] {
     : ['--resume', o.plan.from, '--fork-session', ...(o.plan.at ? ['--resume-session-at', o.plan.at] : [])]
   // Only plain hostnames become rules: anything else could add a rule of its own to the list.
   const allowed = [TOOL_DECISION, TOOL_QUESTION, ...TOOL_SCHEDULE_LOOK, ...o.sites.filter(isSite).map((s) => `WebFetch(domain:${s})`)]
+  const merged = { ...(o.projectSetup && o.keep ? o.keep : {}), ...(o.settings ?? {}) }
   return [
     '-p', '--output-format', 'stream-json', '--verbose', '--include-partial-messages',
     ...session,
     ...(o.model && isModelName(o.model) ? ['--model', o.model] : []),
     ...(o.effort && /^(low|medium|high|xhigh|max)$/.test(o.effort) ? ['--effort', o.effort] : []),
+    ...(o.fallback && isModelName(o.fallback) ? ['--fallback-model', o.fallback] : []),
+    ...(o.budgetUsd && o.budgetUsd > 0 && Number.isFinite(o.budgetUsd) ? ['--max-budget-usd', String(o.budgetUsd)] : []),
+    // With its value: bare, the flag would take the next argument as one.
+    ...(o.suggestions ? ['--prompt-suggestions', 'true'] : []),
     '--append-system-prompt', o.system,
     '--name', cleanName(o.name),
     // `timeout`: its permission prompt waits for a person, silently. Claude Code gives up on an MCP
@@ -104,10 +117,30 @@ export function childArgs(o: ChildOptions): string[] {
     ...(o.permissionMode ? ['--permission-mode', o.permissionMode] : []),
     '--allowedTools', allowed.join(','),
     // The person's own protections hold even when their user settings are left out.
-    ...(o.projectSetup ? ['--setting-sources', 'project,local', ...(o.keep ? ['--settings', JSON.stringify(o.keep)] : [])] : []),
+    ...(o.projectSetup ? ['--setting-sources', 'project,local'] : []),
+    // One --settings for all of it: Claude Code reads only the last one given.
+    ...(Object.keys(merged).length ? ['--settings', JSON.stringify(merged)] : []),
     ...(o.pluginDir ? ['--plugin-dir', o.pluginDir] : []),
     ...(o.persist ? [] : ['--no-session-persistence']),
   ]
+}
+
+/**
+ * What a branch's pin sets for its session beyond its flags, as Claude Code's own settings keys.
+ * `credits`: this turn may use its runner's usage credits (fast mode, a Fable advisor). Without
+ * that, both are set outright, so no settings file (the project's, say) turns either on: fast mode
+ * off, and the advisor the pin's or `ownAdvisor` (the person's own) where that bills nothing, else off.
+ */
+export function turnSettings(pin: { fast?: boolean; style?: string; advisor?: string; thinking?: boolean }, o: { credits: boolean; ownAdvisor?: string }): Record<string, unknown> {
+  const free = (m: string | undefined): m is string => !!m && (m === 'off' || !usesCredits({ name: m }))
+  const advisor = o.credits ? pin.advisor : free(pin.advisor) ? pin.advisor : free(o.ownAdvisor) ? o.ownAdvisor : 'off'
+  return {
+    ...(!o.credits ? { fastMode: false } : pin.fast ? { fastMode: true } : {}),
+    // Unset, each is as its Claude Code has it; an advisor of 'off' turns its own off.
+    ...(pin.style ? { outputStyle: pin.style } : {}),
+    ...(advisor ? { advisorModel: advisor } : {}),
+    ...(pin.thinking === false ? { alwaysThinkingEnabled: false } : {}),
+  }
 }
 
 /** A random v4 UUID, for a new session's id. */
@@ -122,7 +155,8 @@ export function newSessionId(): string {
 
 /** What a turn's session did, read from its stream-json output. Only the main loop counts, not subagents. */
 export type RunEvent =
-  | { kind: 'init'; sessionId: string; model: string }
+  /** `commands`: the commands and skills the session has (its slash_commands). */
+  | { kind: 'init'; sessionId: string; model: string; commands?: string[] }
   /** The text written so far, the part still streaming included. */
   | { kind: 'text'; text: string }
   /** `parent`: the Agent tool call whose subagent made this one. */
@@ -131,7 +165,12 @@ export type RunEvent =
   /** An assistant message the session stored: a turn's last one is where a later fork starts. */
   | { kind: 'message'; uuid: string; model?: string }
   | { kind: 'rate'; status: string; resetsAt?: number; type?: string }
-  | { kind: 'result'; isError: boolean; subtype: string; text: string; usage?: ResultUsage; errors: string[] }
+  /** `fastState`: whether fast mode ran ('on', 'off'), as the result says. */
+  | { kind: 'result'; isError: boolean; subtype: string; text: string; usage?: ResultUsage; errors: string[]; fastState?: string }
+  /** Claude Code's guess at the next prompt, written after the result. */
+  | { kind: 'suggestion'; text: string }
+  /** Something Claude Code said about the session (fast mode turned off, and the like). */
+  | { kind: 'notice'; text: string }
 
 export type ResultUsage = { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
 
@@ -177,7 +216,15 @@ export class StreamReader {
     const sub = m.parent_tool_use_id != null && m.parent_tool_use_id !== ''
     switch (m.type) {
       case 'system':
-        return m.subtype === 'init' ? [{ kind: 'init', sessionId: str(m.session_id), model: str(m.model) }] : []
+        if (m.subtype === 'init') {
+          const commands = Array.isArray(m.slash_commands) ? (m.slash_commands as unknown[]).filter((c): c is string => typeof c === 'string') : undefined
+          return [{ kind: 'init', sessionId: str(m.session_id), model: str(m.model), ...(commands ? { commands } : {}) }]
+        }
+        if (m.subtype === 'notification' && !sub) {
+          const text = (str(m.text) || str(m.message)).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim().slice(0, 300)
+          return text ? [{ kind: 'notice', text }] : []
+        }
+        return []
       case 'stream_event': {
         if (sub) return []
         const e = obj(m.event)
@@ -231,7 +278,11 @@ export class StreamReader {
       }
       case 'result': {
         const errors = Array.isArray(m.errors) ? m.errors.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))) : []
-        return [{ kind: 'result', isError: m.is_error === true, subtype: str(m.subtype), text: str(m.result), usage: obj(m.usage) as ResultUsage, errors }]
+        return [{ kind: 'result', isError: m.is_error === true, subtype: str(m.subtype), text: str(m.result), usage: obj(m.usage) as ResultUsage, errors, ...(str(m.fast_mode_state) ? { fastState: str(m.fast_mode_state) } : {}) }]
+      }
+      case 'prompt_suggestion': {
+        const text = str(m.suggestion).replace(/[\u0000-\u001f\u007f\u2028\u2029]+/g, ' ').trim().slice(0, 2000)
+        return text ? [{ kind: 'suggestion', text }] : []
       }
       default:
         return []

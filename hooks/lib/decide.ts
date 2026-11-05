@@ -3,9 +3,9 @@ import type { Command, CommandContext } from './commands.ts';
 import type { EventBody } from './events.ts';
 import {
   activeTurn, branchDecisions, canSee, clip, countText, historyTurns, isActive, isMain, isOneOff, latestTurnId, leftBehind, mainOf, mayRunFor, openAsks,
-  memberName, nextDecisionId, nextQuestionId, hhmm, modelLabel, turnsOf,
+  memberName, nextDecisionId, nextQuestionId, hhmm, modelLabel, turnsOf, effortLabel, EFFORTS, creditsRefusalFor, fastOk, isModelName, pinText, slashRefusal, steerRefusal, thinkingToggles,
 } from './helpers.ts';
-import type { Branch, Decision, MergeItem, Part, Policy, Schedule, SharedFile, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
+import type { Branch, Decision, MergeItem, ModelPin, Part, Policy, Schedule, SharedFile, SpaceState, Turn, TimelineItem, MemberId, Id } from './types.ts';
 import { DEFAULT_POLICY, FILE_MAX_BYTES, PART_FILES_MAX, SCHEDULE_MAX_MS, SCHEDULE_MIN_MS, SCHEDULES_PER_MEMBER } from './types.ts';
 import { invalid } from './validate.ts';
 
@@ -152,11 +152,14 @@ function routeTurn(s: SpaceState, ctx: CommandContext, branch: Branch, senderId:
     // Someone who left, or who can only read now, runs nothing here (security review).
     const m = s.members[runner];
     if (!m || m.leftAt || m.role === 'viewer') return fail(`${memberName(s, runner)} can’t run turns here any more. Move the work to your Claude Code.`, 'state');
+    // Fable bills its runner's usage credits without asking in a turn's session: only with their yes.
+    const credits = creditsRefusalFor(s, branch.model.name, runner, senderId); if (credits) return fail(credits, 'credits');
     return { runnerId: runner, events: [] };
   }
   const first = o.runIn ?? senderId;
   const who = s.members[first];
   if (!who || who.leftAt || who.role === 'viewer') return fail('That person can’t run turns here.');
+  const credits = creditsRefusalFor(s, branch.model.name, first, senderId); if (credits) return fail(credits, 'credits');
   if (o.online && ctx.online && !ctx.online.includes(first)) {
     return fail(first === senderId
       ? 'Connect your Claude Code to start this conversation, or let someone who has one send first.'
@@ -235,6 +238,18 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
     }
     case 'member.notify':
       return ok({ type: 'member.updated', memberId: actor as MemberId, patch: { notify: cmd.notify } });
+    case 'member.prefs': {
+      // Your own Claude Code, so anyone may set theirs, someone who can only read included.
+      if (cmd.budget !== undefined && !(cmd.budget >= 0 && cmd.budget <= 1000)) return fail('A budget is 0 to 1000 dollars.');
+      const was = s.members[actor]?.prefs ?? {};
+      const out: EventBody[] = [];
+      const mode = cmd.mode ?? was.mode;
+      const credits = cmd.credits ?? was.credits;
+      if (cmd.mode !== undefined || cmd.credits !== undefined) out.push({ type: 'member.prefs', memberId: actor as MemberId, prefs: { ...(mode ? { mode } : {}), ...(credits ? { credits } : {}) } });
+      if (cmd.budget !== undefined) out.push({ type: 'member.budget', memberId: actor as MemberId, budget: cmd.budget });
+      if (!out.length) return fail('Nothing to change.');
+      return ok(...out);
+    }
     case 'sharing.set': {
       // Only for yourself, and only to stop sharing everything at once with '*'.
       if (cmd.source === '*' && cmd.on) return fail('Share one source at a time.');
@@ -315,7 +330,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const carried = cmd.carry ? s.decisions.filter((d) => d.branchId === null && d.status === 'approved').map((d) => d.id) : [];
       const main: Branch = {
         id: mainId, conversationId, name: 'Main', ownerId: null, parentId: null, forkTurnId: null, private: false, state: 'active',
-        model: { name: cmd.model || prev?.model.name || 'opus', effort: prev?.model.effort || 'high', setBy: actor as MemberId, at: ctx.now },
+        model: { name: cmd.model || prev?.model.name || 'opus', effort: 'auto', setBy: actor as MemberId, at: ctx.now },
         createdAt: ctx.now,
       };
       const title = (cmd.title || '').trim() || 'New conversation';
@@ -408,10 +423,21 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
     case 'branch.model': {
       const deny = needWrite(); if (deny) return deny;
       const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
-      if (!['low', 'medium', 'high'].includes(cmd.effort)) return fail('Effort is low, medium or high.');
+      if (![...EFFORTS, 'auto'].includes(cmd.effort)) return fail('Effort is Low, Medium, High, Extra high, Max or Default.');
+      if (cmd.fast && !fastOk(cmd.name)) return fail('Fast mode is for Opus 5.5, Opus 5 and Opus 4.8.');
+      if (cmd.style === 'Learning' && !b.private) return fail('Learning asks you to write code yourself, so it’s for private lanes.');
+      if (cmd.advisor && cmd.advisor !== 'off' && !isModelName(cmd.advisor)) return fail('An advisor is a model, or Off.');
+      if (cmd.fallback && !isModelName(cmd.fallback)) return fail('A fallback is a model.');
+      if (cmd.thinking === false && !thinkingToggles(cmd.name)) return fail(`${modelLabel(cmd.name)} thinks on every turn.`);
+      // The whole pin each time: what a switch leaves out goes back to its Claude Code's own.
+      const model: ModelPin = {
+        name: cmd.name, effort: cmd.effort, ...(cmd.fast ? { fast: true } : {}), ...(cmd.style ? { style: cmd.style } : {}),
+        ...(cmd.advisor ? { advisor: cmd.advisor } : {}), ...(cmd.thinking === false ? { thinking: false as const } : {}), ...(cmd.fallback ? { fallback: cmd.fallback } : {}),
+        setBy: actor as MemberId, at: ctx.now,
+      };
       return ok(
-        { type: 'branch.model', branchId: b.id, model: { name: cmd.name, effort: cmd.effort, setBy: actor as MemberId, at: ctx.now } },
-        ev(ctx, b.id, 'layers', `${memberName(s, actor)} switched ${isMain(s, b.id) ? 'main' : 'this branch'} to ${modelLabel(cmd.name)} · ${cmd.effort}, for everyone`),
+        { type: 'branch.model', branchId: b.id, model },
+        ev(ctx, b.id, 'layers', `${memberName(s, actor)} switched ${isMain(s, b.id) ? 'main' : 'this branch'} to ${pinText(model)}, for everyone`),
       );
     }
 
@@ -455,6 +481,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const deny = needWrite(); if (deny) return deny;
       const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
       const text = cmd.text.trim();
+      const refused = slashRefusal(text); if (refused) return fail(refused);
       // Files attached: ones this person uploaded to this branch, a few at a time.
       let files: Id[] | undefined;
       if (cmd.files !== undefined) {
@@ -492,8 +519,25 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const deny = needWrite(); if (deny) return deny;
       const b = branchOk(cmd.branchId); if (isDecided(b)) return b;
       if (b.state === 'merged') return fail('That branch was merged.');
+      // /context: what this person's own session of the branch holds, to them alone (as a side question).
+      if (cmd.mode === 'context') {
+        const text = (cmd.text ?? '').trim();
+        if (!/^\/context(\s|$)/.test(text)) return fail('Send /context on its own.');
+        if (Object.values(s.turns).some((x) => x.mode === 'context' && x.senderId === actor && isActive(x))) return fail('Your /context is on its way.');
+        const turn = turnFrom(ctx, s, b, [{ memberId: actor as MemberId, text }], { mode: 'context', private: true, checked: true });
+        return ok({ type: 'turn.requested', turn, consumed: [] });
+      }
       const busy = activeTurn(s, b.id);
       if (busy) return fail(`${memberName(s, busy.runnerId)}’s turn is still running here. One at a time on each branch.`, 'busy');
+      // /compact: the branch's session, compacted for everyone, where it runs (asking as a turn would).
+      if (cmd.mode === 'compact') {
+        const text = (cmd.text ?? '').trim();
+        if (!/^\/compact(\s|$)/.test(text)) return fail('Send /compact, and what to keep if you like.');
+        const route = routeTurn(s, ctx, b, actor as MemberId, { online: true }); if (!routed(route)) return route;
+        const oks = oksFor(s, b, actor as MemberId, route.runnerId);
+        const turn = turnFrom(ctx, s, b, [{ memberId: actor as MemberId, text }], { mode: 'compact', status: oks.length ? 'held' : 'requested', runnerId: route.runnerId, checked: true });
+        return ok(...route.events, { type: 'turn.requested', turn, consumed: [] }, ...askEvents(ctx, b, turn, oks));
+      }
       const parts = s.parts[b.id] || [];
       if (!parts.length) return fail('Nothing to send yet.');
       const mode = cmd.mode === 'view-first' ? 'view-first' : 'normal';
@@ -515,10 +559,20 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       const route = routeTurn(s, ctx, b, actor as MemberId, { runIn: cmd.runIn, online: true }); if (!routed(route)) return route;
       const oks = oksFor(s, b, actor as MemberId, route.runnerId);
       const turn = turnFrom(ctx, s, b, parts.map((p) => ({ memberId: p.memberId, text: p.text, position: p.position || undefined, ...(p.cites ? { cites: p.cites } : {}), ...(p.editedBy ? { editedBy: p.editedBy } : {}), ...(p.files?.length ? { files: p.files } : {}) })), {
-        mode, status: oks.length ? 'held' : 'requested', handedFrom, ...(cmd.plan ? { plan: true } : {}), runnerId: route.runnerId,
+        mode, status: oks.length ? 'held' : 'requested', handedFrom, ...(cmd.plan ? { plan: true } : {}), ...(cmd.research ? { research: true } : {}), runnerId: route.runnerId,
       });
       out.push(...route.events, { type: 'turn.requested', turn, consumed: parts.map((p) => p.id) }, ...askEvents(ctx, b, turn, oks));
       return ok(...out);
+    }
+    case 'turn.steer': {
+      const deny = needWrite(); if (deny) return deny;
+      const t = s.turns[cmd.turnId];
+      if (!seesTurn(t)) return fail('No such turn.');
+      const refused = steerRefusal(s, t, actor as MemberId); if (refused) return fail(refused);
+      const text = cmd.text.trim();
+      if (!text) return fail('Write something to add.');
+      if ((t.steers?.length ?? 0) >= 20) return fail('That’s a lot to add to one turn. Add the rest to the next prompt.');
+      return ok({ type: 'turn.steered', turnId: t.id, steer: { n: (t.steers?.length ?? 0) + 1, by: actor as MemberId, text, at: ctx.now } });
     }
     case 'turn.resolve': {
       const deny = needWrite(); if (deny) return deny;
@@ -574,6 +628,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (busy) return fail('Another turn is running on this branch.', 'busy');
       // A side question or recap is its asker's own; anything else runs where its branch runs.
       const route = isOneOff(t) ? { runnerId: actor as MemberId, events: [] } : routeTurn(s, ctx, b, actor as MemberId, { online: true }); if (!routed(route)) return route;
+      if (isOneOff(t)) { const credits = creditsRefusalFor(s, b.model.name, actor as MemberId, actor as MemberId); if (credits) return fail(credits, 'credits'); }
       const oks = isOneOff(t) ? [] : oksFor(s, b, actor as MemberId, route.runnerId);
       const turn = turnFrom(ctx, s, b, t.parts, { mode: t.mode === 'reveal' ? 'reveal' : t.mode, retryOf: t.id, revealOf: t.revealOf, checked: true, private: t.private, runnerId: route.runnerId, status: oks.length ? 'held' : 'requested' });
       return ok(...route.events, { type: 'turn.requested', turn, consumed: [] }, ...askEvents(ctx, b, turn, oks));
@@ -958,6 +1013,10 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (away) return fail(`The work is still on its way to ${memberName(s, away.to)}’s Claude Code.`, 'busy');
       const lease = s.leases[t.branchId];
       if (lease && lease.turnId !== t.id && !isOneOff(t)) return fail('Another turn holds this branch.', 'busy');
+      // Checked again as it starts: the branch may have switched to Fable since it was sent.
+      const pinned = s.branches[t.branchId]?.model.name ?? '';
+      const credits = creditsRefusalFor(s, cmd.model || pinned, actor as MemberId, t.senderId) ?? creditsRefusalFor(s, pinned, actor as MemberId, t.senderId);
+      if (credits) return fail(credits, 'credits');
       return ok({ type: 'turn.started', turnId: t.id, runnerId: actor as MemberId, model: cmd.model });
     }
     case 'runner.step': {
@@ -980,14 +1039,14 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!t || t.runnerId !== actor) return fail('Not your turn.', 'forbidden');
       if (t.status === 'stopped') return ok({ type: 'turn.text', turnId: t.id, text: cmd.text });
       if (!isActive(t)) return fail('That turn already ended.', 'state');
-      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text, usage: cmd.usage, model: cmd.model, replies: cmd.replies, ...(cmd.thinking?.trim() ? { thinking: cmd.thinking } : {}) });
+      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text, usage: cmd.usage, model: cmd.model, replies: cmd.replies, ...(cmd.thinking?.trim() ? { thinking: cmd.thinking } : {}), ...(cmd.effort ? { effort: cmd.effort } : {}), ...(cmd.fast !== undefined ? { fast: cmd.fast } : {}), ...(cmd.notices?.length ? { notices: cmd.notices } : {}), ...(cmd.suggestion?.trim() ? { suggestion: cmd.suggestion } : {}) });
     }
     case 'runner.fail': {
       const t = s.turns[cmd.turnId];
       if (!t || t.runnerId !== actor) return fail('Not your turn.', 'forbidden');
       if (!isActive(t)) return ok();
       const r = cmd.failure.reason;
-      if (!t.startedAt && (r === 'limit' || r === 'model-unavailable' || r === 'not-connected' || r === 'not-signed-in')) {
+      if (!t.startedAt && (r === 'limit' || r === 'model-unavailable' || r === 'credits' || r === 'not-connected' || r === 'not-signed-in')) {
         // Declined before anything ran: give the parts back so someone else can send them.
         const out: EventBody[] = [{ type: 'turn.failed', turnId: t.id, failure: cmd.failure }];
         if (t.mode === 'normal' || t.mode === 'view-first' || t.mode === 'weigh') {
@@ -1166,6 +1225,11 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (s.files?.[f.id!]) return ok();
       const file: SharedFile = { id: f.id!, name: f.name!, type: f.type!, size: f.size, by: f.by as MemberId, at: ctx.now, branchId: f.branchId!, from: f.from, ...(f.turnId ? { turnId: f.turnId } : {}) };
       return ok({ type: 'file.added', file });
+    }
+    case 'server.steers-taken': {
+      const t = s.turns[cmd.turnId];
+      if (!t || !(cmd.through > (t.steersTaken ?? 0)) || cmd.through > (t.steers?.length ?? 0)) return ok();
+      return ok({ type: 'turn.steers-taken', turnId: t.id, through: cmd.through });
     }
     case 'server.note': {
       const t = s.turns[cmd.turnId];

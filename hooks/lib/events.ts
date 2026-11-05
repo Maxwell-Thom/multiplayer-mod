@@ -1,8 +1,8 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
 import type {
-  Ask, Branch, ChatMessage, Conversation, Decision, FilesPush, Handoff, Member, MemberId, Merge,
+  Ask, Branch, ChatMessage, Conversation, Decision, FilesPush, Handoff, Member, MemberId, MemberPrefs, Merge,
   MergeChoice, ModelPin, Note, Part, Policy, Presence, Question, RunnerInfo, Space, Step, TimelineItem,
-  Schedule, SharedFile, Transfer, Turn, TurnFailure, TurnMode, TurnWork, Usage, Id,
+  Schedule, SharedFile, Steer, Transfer, Turn, TurnFailure, TurnMode, TurnWork, Usage, Id,
 } from './types.ts';
 import type { AskQuestion } from './helpers.ts';
 
@@ -11,6 +11,10 @@ export type EventBody =
   | { type: 'space.created'; space: Space; host: Member }
   | { type: 'member.joined'; member: Member }
   | { type: 'member.updated'; memberId: MemberId; patch: Partial<Pick<Member, 'name' | 'role' | 'notify' | 'limit'>> }
+  // A person's own choices: how turns start there and whose may use their usage credits (everyone sees these)…
+  | { type: 'member.prefs'; memberId: MemberId; prefs: Omit<MemberPrefs, 'budget'> }
+  // …and what others' turns may spend there (only they do).
+  | { type: 'member.budget'; memberId: MemberId; budget: number }
   | { type: 'file.added'; file: SharedFile }
   | { type: 'schedule.created'; schedule: Schedule }
   | { type: 'schedule.updated'; scheduleId: Id; patch: Partial<Pick<Schedule, 'next' | 'left' | 'status' | 'lastTurn' | 'stoppedBy'>> }
@@ -48,7 +52,9 @@ export type EventBody =
   | { type: 'turn.resumed'; turnId: Id }
   | { type: 'turn.takeover'; turnId: Id; runnerId: MemberId }
   | { type: 'turn.text'; turnId: Id; text: string }
-  | { type: 'turn.done'; turnId: Id; text: string; usage?: Usage; model?: string; replies?: string[]; thinking?: string }
+  | { type: 'turn.steered'; turnId: Id; steer: Steer }
+  | { type: 'turn.steers-taken'; turnId: Id; through: number }
+  | { type: 'turn.done'; turnId: Id; text: string; usage?: Usage; model?: string; effort?: string; fast?: boolean; notices?: string[]; suggestion?: string; replies?: string[]; thinking?: string }
   | { type: 'turn.failed'; turnId: Id; failure: TurnFailure }
   | { type: 'turn.stopped'; turnId: Id; by: MemberId }
   | { type: 'turn.work'; turnId: Id; work: TurnWork }

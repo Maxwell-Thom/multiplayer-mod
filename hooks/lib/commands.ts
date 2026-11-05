@@ -1,11 +1,12 @@
 // Copied from packages/protocol/src by packages/mod/scripts/sync-protocol.mjs. Do not edit here.
-import type { FilesPush, Id, ImportSource, ImportTurn, MemberId, MergeChoice, Policy, Role, SharedFile, Step, Turn, TurnFailure, TurnWork, Usage, Member } from './types.ts';
+import type { Effort, OutputStyle, FilesPush, Id, ImportSource, ImportTurn, MemberId, MergeChoice, Policy, Role, SharedFile, Step, Turn, TurnFailure, TurnWork, Usage, Member, MemberPrefs } from './types.ts';
 
 /** What people (through the web app or claude.ai) and runners ask the server to do. */
 export type Command =
   // members and the space
   | { type: 'member.rename'; name: string }
   | { type: 'member.notify'; notify: Member['notify'] }
+  | { type: 'member.prefs'; mode?: MemberPrefs['mode']; credits?: MemberPrefs['credits']; budget?: number }
   /** Share a private source with this space, or stop (`source: '*'` with `on: false` stops everything). */
   | { type: 'sharing.set'; source: string; name: string; on: boolean }
   | { type: 'member.role'; memberId: MemberId; role: Role }
@@ -22,7 +23,7 @@ export type Command =
   | { type: 'branch.fork'; fromBranchId: Id; atTurnId?: Id; private?: boolean; name?: string; editOf?: Id; editText?: string; editParts?: { memberId: Id; text: string }[]; inMine?: boolean }
   | { type: 'branch.state'; branchId: Id; state: 'parked' | 'active' }
   | { type: 'branch.rename'; branchId: Id; name: string }
-  | { type: 'branch.model'; branchId: Id; name: string; effort: 'low' | 'medium' | 'high' }
+  | { type: 'branch.model'; branchId: Id; name: string; effort: Effort; fast?: boolean; style?: OutputStyle; advisor?: string; thinking?: boolean; fallback?: string }
   /** Brings a conversation had elsewhere into an empty main line, in order (several commands for a long one). */
   | { type: 'branch.import'; branchId: Id; source: ImportSource; turns: ImportTurn[]; model?: string }
   // writing and sending
@@ -31,9 +32,10 @@ export type Command =
   | { type: 'part.remove'; partId: Id }
   /** `plan`: Claude Code's plan mode: it plans first, and builds once its sender approves the plan. */
   /** `runIn`: for a branch that runs in nobody's Claude Code yet, whose it starts in (else the sender's). */
-  | { type: 'turn.send'; branchId: Id; mode?: 'normal' | 'view-first'; handoffId?: Id; plan?: boolean; runIn?: MemberId }
+  | { type: 'turn.send'; branchId: Id; mode?: 'normal' | 'view-first' | 'compact' | 'context'; text?: string; handoffId?: Id; plan?: boolean; research?: boolean; runIn?: MemberId }
   | { type: 'turn.resolve'; turnId: Id; pick: string }
   | { type: 'turn.stop'; turnId: Id }
+  | { type: 'turn.steer'; turnId: Id; text: string }
   | { type: 'turn.takeover'; turnId: Id }
   | { type: 'turn.retry'; turnId: Id }
   | { type: 'turn.reveal'; turnId: Id }
@@ -76,7 +78,7 @@ export type Command =
   | { type: 'runner.approval'; turnId: Id; waiting: boolean; sharing?: boolean }
   | { type: 'runner.text'; turnId: Id; text: string }
   /** `thinking`: what Claude thought before it answered, as Claude Code shows it. */
-  | { type: 'runner.done'; turnId: Id; text: string; usage?: Usage; model?: string; replies?: string[]; thinking?: string }
+  | { type: 'runner.done'; turnId: Id; text: string; usage?: Usage; model?: string; effort?: string; fast?: boolean; notices?: string[]; suggestion?: string; replies?: string[]; thinking?: string }
   | { type: 'runner.fail'; turnId: Id; failure: TurnFailure }
   | { type: 'runner.decision'; turnId: Id; text: string; replaces?: string }
   | { type: 'runner.question'; turnId: Id; text: string }
@@ -106,7 +108,8 @@ export type Command =
   | { type: 'server.schedule-fire'; scheduleId: Id }
   /** Its bytes are stored: the file joins the space (the upload route sends this). */
   | { type: 'server.file'; file: SharedFile }
-  | { type: 'server.note'; turnId: Id; text: string };
+  | { type: 'server.note'; turnId: Id; text: string }
+  | { type: 'server.steers-taken'; turnId: Id; through: number };
 
 export type CommandType = Command['type'];
 

@@ -24,6 +24,10 @@ export function redactState(full: SpaceState, memberId: MemberId): SpaceState {
   let s: SpaceState = full.sharing && Object.keys(full.sharing).some((k) => k !== memberId)
     ? { ...full, sharing: full.sharing[memberId] ? { [memberId]: full.sharing[memberId] } : {} }
     : full;
+  // What someone lets others' turns spend in their Claude Code is theirs alone.
+  if (Object.values(s.members).some((m) => m.id !== memberId && m.prefs?.budget !== undefined)) {
+    s = { ...s, members: Object.fromEntries(Object.entries(s.members).map(([k, m]) => [k, m.id !== memberId && m.prefs?.budget !== undefined ? { ...m, prefs: (({ budget: _, ...rest }) => rest)(m.prefs) } : m])) };
+  }
   // A project's fingerprint is for the server's check only: it could confirm a guess of someone's repository.
   if (Object.values(s.branches).some((b) => b.repo)) {
     s = { ...s, branches: Object.fromEntries(Object.entries(s.branches).map(([k, b]) => [k, b.repo ? (({ repo: _, ...rest }) => rest)(b) : b])) };
@@ -111,8 +115,11 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
     case 'turn.failed':
     case 'turn.stopped':
     case 'turn.work':
+    case 'turn.steered':
+    case 'turn.steers-taken':
       return turnAudience(e.turnId);
     case 'sharing.changed': return [e.memberId];
+    case 'member.budget': return [e.memberId];
     case 'schedule.created': return branchAudience(e.schedule.branchId);
     case 'schedule.updated': return branchAudience((after.schedules?.[e.scheduleId] ?? before.schedules?.[e.scheduleId])?.branchId);
     case 'file.added': return e.file.turnId ? turnAudience(e.file.turnId) : branchAudience(e.file.branchId);

@@ -104,6 +104,16 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
       if (m) s.members = { ...s.members, [e.memberId]: { ...m, ...e.patch } };
       return s;
     }
+    case 'member.prefs': {
+      const m = s.members[e.memberId];
+      if (m) s.members = { ...s.members, [e.memberId]: { ...m, prefs: { ...e.prefs, ...(m.prefs?.budget !== undefined ? { budget: m.prefs.budget } : {}) } } };
+      return s;
+    }
+    case 'member.budget': {
+      const m = s.members[e.memberId];
+      if (m) s.members = { ...s.members, [e.memberId]: { ...m, prefs: { ...m.prefs, budget: e.budget } } };
+      return s;
+    }
     case 'member.left': {
       const m = s.members[e.memberId];
       if (m) s.members = { ...s.members, [e.memberId]: { ...m, leftAt: e.at } };
@@ -209,7 +219,7 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
       const t = s.turns[e.turnId];
       if (!t) return s;
       s = patchTurn(s, e.turnId, { status: 'running', runnerId: e.runnerId, startedAt: e.at, model: e.model ?? t.model, pausedAt: undefined });
-      if (t.mode !== 'recap' && t.mode !== 'aside') s.leases = { ...s.leases, [t.branchId]: { branchId: t.branchId, holderId: e.runnerId, turnId: t.id, heartbeatAt: e.at } };
+      if (t.mode !== 'recap' && t.mode !== 'aside' && t.mode !== 'context') s.leases = { ...s.leases, [t.branchId]: { branchId: t.branchId, holderId: e.runnerId, turnId: t.id, heartbeatAt: e.at } };
       return s;
     }
     case 'turn.step': {
@@ -237,11 +247,21 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     }
     case 'turn.text':
       return patchTurn(s, e.turnId, { text: e.text });
+    case 'turn.steered': {
+      const t = s.turns[e.turnId];
+      if (t) s = patchTurn(s, e.turnId, { steers: [...(t.steers ?? []), e.steer] });
+      return s;
+    }
+    case 'turn.steers-taken': {
+      const t = s.turns[e.turnId];
+      if (t && e.through > (t.steersTaken ?? 0)) s = patchTurn(s, e.turnId, { steersTaken: e.through });
+      return s;
+    }
     case 'turn.done':
-      s = patchTurn(s, e.turnId, { status: 'done', text: e.text, usage: e.usage, model: e.model ?? s.turns[e.turnId]?.model, replies: e.replies, endedAt: e.at, ...(e.thinking ? { thinking: e.thinking } : {}) });
+      s = patchTurn(s, e.turnId, { status: 'done', text: e.text, usage: e.usage, model: e.model ?? s.turns[e.turnId]?.model, replies: e.replies, endedAt: e.at, ...(e.thinking ? { thinking: e.thinking } : {}), ...(e.effort ? { effort: e.effort } : {}), ...(e.fast !== undefined ? { fast: e.fast } : {}), ...(e.notices?.length ? { notices: e.notices } : {}), ...(e.suggestion?.trim() ? { suggestion: e.suggestion.trim() } : {}) });
       return releaseLease(s, e.turnId);
     case 'turn.failed': {
-      const declined = e.failure.reason === 'limit' || e.failure.reason === 'model-unavailable' || e.failure.reason === 'not-connected' || e.failure.reason === 'not-signed-in';
+      const declined = e.failure.reason === 'limit' || e.failure.reason === 'model-unavailable' || e.failure.reason === 'credits' || e.failure.reason === 'not-connected' || e.failure.reason === 'not-signed-in';
       const t = s.turns[e.turnId];
       const notStarted = !!t && !t.startedAt;
       s = patchTurn(s, e.turnId, { status: declined && notStarted ? 'declined' : 'failed', failure: e.failure, endedAt: e.at });

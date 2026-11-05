@@ -229,7 +229,8 @@ export function buildTurnContext(s: SpaceState, turn: Turn, opts: ContextOptions
 
   // History this session doesn't hold yet.
   if (branch) {
-    const hist = historyTurns(s, branch.id).filter((t) => t.id !== turn.id && t.status !== 'requested' && t.status !== 'held' && t.status !== 'conflict' && !isOneOff(t) && !(t.private && t.runnerId !== turn.runnerId));
+    // (A /compact was about one session: no other session needs to hear it.)
+    const hist = historyTurns(s, branch.id).filter((t) => t.id !== turn.id && t.status !== 'requested' && t.status !== 'held' && t.status !== 'conflict' && !isOneOff(t) && t.mode !== 'compact' && !(t.private && t.runnerId !== turn.runnerId));
     let from = 0;
     if (opts.sinceTurnId) {
       const at = hist.findIndex((t) => t.id === opts.sinceTurnId);
@@ -278,6 +279,11 @@ export function buildTurnContext(s: SpaceState, turn: Turn, opts: ContextOptions
     }
     case 'merge-note':
       prompt = turn.parts.map((p) => p.text).join('\n\n');
+      break;
+    // Claude Code's own commands, as it reads them: the command alone, at the start.
+    case 'compact':
+    case 'context':
+      prompt = (turn.parts[0]?.text ?? '').trim();
       break;
     case 'recap': {
       prompt = turn.parts.map((p) => p.text).join('\n\n');
@@ -350,7 +356,7 @@ export function sessionSystem(s: SpaceState, turn: Turn): string {
   const runner = memberName(s, turn.runnerId);
   const where = `space “${s.space.name}”${conv ? `, conversation “${conv.title}”` : ''}${branch && !isMain(s, branch.id) ? `, branch “${branch.name}”` : ''}`;
   // A side question runs in a fork of its branch's own session: the same instructions, so the cache holds.
-  if (turn.private && !(turn.mode === 'aside' && !branch?.private)) {
+  if (turn.private && !((turn.mode === 'aside' || turn.mode === 'context') && !branch?.private)) {
     return [
       `This session is ${branch?.private ? `${runner}'s private lane` : `a private recap for ${runner}`} in Multiplayer, ${where}.`,
       `Only ${runner} sees these turns and your answers; nothing reaches the others unless ${runner} shares it. ${runner}'s own memory, notes and instructions are fine to use here.`,
@@ -403,6 +409,7 @@ function fullTurn(s: SpaceState, t: Turn, r: Reader, nested = false): string {
   const who = t.mode === 'merge-note' ? 'Merge note'
     : t.mode === 'reveal' ? `Positions people held back (unattributed):\n${t.parts.map((p, i) => `${i + 1}. ${p.text}`).join('\n')}`
     : partsText(s, t, t.mode !== 'view-first');
+  const added = (t.steers ?? []).map((x) => `\n(${memberName(s, x.by)} added while Claude worked: ${x.text})`).join('');
   const own = t.steps.filter((x) => x.under === undefined);
   const steps = own.length ? `\n[Claude used ${own.length} step${own.length === 1 ? '' : 's'}: ${own.map((x) => x.text).join('; ')}]` : '';
   const answer = (t.status === 'done' ? t.text : t.status === 'stopped' ? `${t.text} [stopped]` : `[${t.status}]`) + filesLine(s, t.files, 'shared with everyone');
@@ -412,7 +419,7 @@ function fullTurn(s: SpaceState, t: Turn, r: Reader, nested = false): string {
   const where = t.imported
     ? `in ${memberName(s, t.runnerId)}'s own ${t.imported.from === 'claude-code' ? 'Claude Code session' : 'claude.ai chat'}, before it was brought here`
     : `on ${memberName(s, t.runnerId)}'s machine`;
-  return [...cited, `${who}${steps}${t.imported ? '' : workNote(s, t, r)}\nClaude (${where}): ${answer}`].join('\n\n');
+  return [...cited, `${who}${added}${steps}${t.imported ? '' : workNote(s, t, r)}\nClaude (${where}): ${answer}`].join('\n\n');
 }
 
 function fullTurns(s: SpaceState, turns: Turn[], cap: number, r: Reader): string {
@@ -430,6 +437,8 @@ function fullTurns(s: SpaceState, turns: Turn[], cap: number, r: Reader): string
 export function buildSessionTurn(s: SpaceState, turn: Turn, opts: SessionTurnOptions = {}): SessionTurn {
   const branch = s.branches[turn.branchId];
   const { prompt } = buildTurnContext(s, turn);
+  // A command goes alone (Claude Code recognizes one only at the start); the next turn catches up.
+  if (turn.mode === 'compact' || turn.mode === 'context') return { system: sessionSystem(s, turn), message: prompt, state: opts.lastState ?? '', prompt };
   const cap = opts.maxChars ?? 400_000;
   const notes: string[] = [];
   const r: Reader = { runnerId: turn.runnerId, folder: opts.folder };
@@ -441,7 +450,8 @@ export function buildSessionTurn(s: SpaceState, turn: Turn, opts: SessionTurnOpt
     // A recap or side question never joins the branch: not even its asker's session hears it again.
     const hist = historyTurns(s, branch.id).filter((t) => t.id !== turn.id && t.status !== 'requested' && t.status !== 'held' && t.status !== 'conflict' && !isOneOff(t) && !(t.private && t.runnerId !== turn.runnerId));
     const at = opts.heldThrough ? hist.findIndex((t) => t.id === opts.heldThrough) : -1;
-    const missing = hist.slice(at + 1);
+    // (A /compact was about the session it ran in: found here as where that one is, never sent on.)
+    const missing = hist.slice(at + 1).filter((t) => t.mode !== 'compact');
     if (missing.length) {
       const head = at >= 0 ? 'Since your last turn here, the conversation went on:' : `The conversation so far${branch.parentId ? ` (this branch continues from ${s.branches[branch.parentId]?.name ?? 'its parent'})` : ''}:`;
       notes.push(`${head}\n\n${fullTurns(s, missing, cap, r)}`);
@@ -454,9 +464,17 @@ export function buildSessionTurn(s: SpaceState, turn: Turn, opts: SessionTurnOpt
       notes.push(own.length ? `The branch “${merged.name}” being merged, its own turns since it left ${branch.name}:\n\n${fullTurns(s, own, cap, r)}` : `The branch “${merged.name}” being merged has no turns of its own.`);
     }
   }
+  // What people added to this session's last turn after Claude had finished reading (no tool call
+  // came after it): it comes now, said as what it was.
+  const last = opts.heldThrough ? s.turns[opts.heldThrough] : undefined;
+  if (last && last.runnerId === turn.runnerId && last.branchId === turn.branchId) {
+    for (const x of (last.steers ?? []).filter((x) => x.n > (last.steersTaken ?? 0))) notes.push(`${memberName(s, x.by)} added while Claude worked, after it had finished reading:\n\n${x.text}`);
+  }
   if (turn.takenFrom) notes.push(`${memberName(s, turn.takenFrom)}'s Claude went quiet while running this turn, so ${memberName(s, turn.runnerId)} took it over. Start it fresh.`);
 
-  const message = notes.length ? `${notes.map((n) => `[Multiplayer] ${n}`).join('\n\n')}\n\n---\n\n${prompt}` : prompt;
+  const told = notes.length ? `${notes.map((n) => `[Multiplayer] ${n}`).join('\n\n')}\n\n---\n\n${prompt}` : prompt;
+  // Research is Claude Code's /deep-research: the command first (where it reads one), the turn as its brief.
+  const message = turn.research ? `/deep-research ${told}` : told;
   return { system: sessionSystem(s, turn), message, state, prompt };
 }
 
