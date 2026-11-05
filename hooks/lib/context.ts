@@ -409,7 +409,7 @@ function fullTurn(s: SpaceState, t: Turn, r: Reader, nested = false): string {
   const who = t.mode === 'merge-note' ? 'Merge note'
     : t.mode === 'reveal' ? `Positions people held back (unattributed):\n${t.parts.map((p, i) => `${i + 1}. ${p.text}`).join('\n')}`
     : partsText(s, t, t.mode !== 'view-first');
-  const added = (t.steers ?? []).map((x) => `\n(${memberName(s, x.by)} added while Claude worked: ${x.text})`).join('');
+  const added = (t.steers ?? []).filter((x) => !x.withdrawn).map((x) => `\n(${memberName(s, x.by)} added while Claude worked: ${x.text})`).join('');
   const own = t.steps.filter((x) => x.under === undefined);
   const steps = own.length ? `\n[Claude used ${own.length} step${own.length === 1 ? '' : 's'}: ${own.map((x) => x.text).join('; ')}]` : '';
   const answer = (t.status === 'done' ? t.text : t.status === 'stopped' ? `${t.text} [stopped]` : `[${t.status}]`) + filesLine(s, t.files, 'shared with everyone');
@@ -464,17 +464,8 @@ export function buildSessionTurn(s: SpaceState, turn: Turn, opts: SessionTurnOpt
       notes.push(own.length ? `The branch “${merged.name}” being merged, its own turns since it left ${branch.name}:\n\n${fullTurns(s, own, cap, r)}` : `The branch “${merged.name}” being merged has no turns of its own.`);
     }
   }
-  // What people added to this session's last turn after Claude had finished reading (no tool call
-  // came after it): it comes now, said as what it was.
-  // (Past a /compact, which nobody adds to: the turn before it.)
-  let last = opts.heldThrough ? s.turns[opts.heldThrough] : undefined;
-  if (last?.mode === 'compact') {
-    const before = historyTurns(s, last.branchId).filter((t) => t.mode !== 'compact' && t.requestedAt < last!.requestedAt && t.runnerId === turn.runnerId);
-    last = before[before.length - 1];
-  }
-  if (last && last.runnerId === turn.runnerId && last.branchId === turn.branchId) {
-    for (const x of (last.steers ?? []).filter((x) => x.n > (last.steersTaken ?? 0))) notes.push(`${memberName(s, x.by)} added while Claude worked, after it had finished reading:\n\n${x.text}`);
-  }
+  // (What people added to the last turn after Claude had finished reading went out as a turn of its
+  // own when that turn ended, as Claude Code sends what's queued: nothing to carry here.)
   if (turn.takenFrom) notes.push(`${memberName(s, turn.takenFrom)}'s Claude went quiet while running this turn, so ${memberName(s, turn.runnerId)} took it over. Start it fresh.`);
 
   const told = notes.length ? `${notes.map((n) => `[Multiplayer] ${n}`).join('\n\n')}\n\n---\n\n${prompt}` : prompt;

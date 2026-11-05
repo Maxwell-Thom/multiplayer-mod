@@ -175,6 +175,28 @@ function routeTurn(s: SpaceState, ctx: CommandContext, branch: Branch, senderId:
   };
 }
 
+/**
+ * What people added to a turn that Claude never read (after its last tool call). As Claude Code sends
+ * what's queued once a turn ends, it goes out as the next turn, in order, sent by whoever added the
+ * first; when it can't (the turn failed or never started, or it can't be routed), it's back in the
+ * draft as parts, so nothing is lost.
+ */
+function queuedAfter(s: SpaceState, ctx: CommandContext, t: Turn, ended: 'done' | 'stopped' | 'failed'): EventBody[] {
+  const unread = (t.steers ?? []).filter((x) => x.n > (t.steersTaken ?? 0) && !x.withdrawn);
+  const b = s.branches[t.branchId];
+  if (!unread.length || !b || isOneOff(t) || b.state === 'merged') return [];
+  const back = (): EventBody[] => unread.map((x, i) => ({ type: 'part.added', part: { id: ctx.id('p'), branchId: b.id, memberId: x.by, text: x.text, at: ctx.now + i } }));
+  if (ended === 'failed') return back();
+  const sender = unread[0].by;
+  const m = s.members[sender];
+  if (!m || m.leftAt || m.role === 'viewer') return back();
+  const route = routeTurn(s, ctx, b, sender);
+  if (!routed(route)) return back();
+  const oks = oksFor(s, b, sender, route.runnerId);
+  const turn = turnFrom(ctx, s, b, unread.map((x) => ({ memberId: x.by, text: x.text })), { senderId: sender, runnerId: route.runnerId, status: oks.length ? 'held' : 'requested' });
+  return [...route.events, { type: 'turn.requested', turn, consumed: [] }, ...askEvents(ctx, b, turn, oks)];
+}
+
 function turnFrom(ctx: CommandContext, s: SpaceState, branch: Branch, parts: Turn['parts'], patch: Partial<Turn> = {}): Turn {
   return {
     id: ctx.id('t'),
@@ -590,6 +612,13 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if ((t.steers?.length ?? 0) >= 20) return fail('That’s a lot to add to one turn. Add the rest to the next prompt.');
       return ok({ type: 'turn.steered', turnId: t.id, steer: { n: (t.steers?.length ?? 0) + 1, by: actor as MemberId, text, at: ctx.now } });
     }
+    case 'turn.unsteer': {
+      const t = s.turns[cmd.turnId];
+      if (!seesTurn(t)) return fail('No such turn.');
+      const mine = (t.steers ?? []).filter((x) => x.by === actor && !x.withdrawn && x.n > (t.steersTaken ?? 0));
+      if (!isActive(t) || !mine.length) return fail('Nothing of yours is waiting for Claude.');
+      return ok({ type: 'turn.unsteered', turnId: t.id, ns: mine.map((x) => x.n) });
+    }
     case 'turn.resolve': {
       const deny = needWrite(); if (deny) return deny;
       const t = s.turns[cmd.turnId];
@@ -616,9 +645,10 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (t.status === 'held' || t.status === 'conflict' || (t.status === 'requested' && !t.startedAt)) {
         // A recap's text is the asker's own: it never goes back into anyone's draft.
         const restore: Part[] = isOneOff(t) || t.mode === 'merge-note' ? [] : restoreOf(ctx, t);
-        return ok({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore });
+        return ok({ type: 'turn.cancelled', turnId: t.id, by: actor as MemberId, restore }, ...queuedAfter(s, ctx, t, 'failed'));
       }
-      return ok({ type: 'turn.stopped', turnId: t.id, by: actor as MemberId });
+      // Stopped: what was queued goes out now (Claude Code's Esc).
+      return ok({ type: 'turn.stopped', turnId: t.id, by: actor as MemberId }, ...queuedAfter(s, ctx, t, 'stopped'));
     }
     case 'turn.takeover': {
       const deny = needWrite(); if (deny) return deny;
@@ -1064,7 +1094,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
       if (!t || t.runnerId !== actor) return fail('Not your turn.', 'forbidden');
       if (t.status === 'stopped') return ok({ type: 'turn.text', turnId: t.id, text: cmd.text });
       if (!isActive(t)) return fail('That turn already ended.', 'state');
-      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text, usage: cmd.usage, model: cmd.model, replies: cmd.replies, ...(cmd.thinking?.trim() ? { thinking: cmd.thinking } : {}), ...(cmd.effort ? { effort: cmd.effort } : {}), ...(cmd.fast !== undefined ? { fast: cmd.fast } : {}), ...(cmd.notices?.length ? { notices: cmd.notices } : {}), ...(cmd.suggestion?.trim() ? { suggestion: cmd.suggestion } : {}) });
+      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text, usage: cmd.usage, model: cmd.model, replies: cmd.replies, ...(cmd.thinking?.trim() ? { thinking: cmd.thinking } : {}), ...(cmd.effort ? { effort: cmd.effort } : {}), ...(cmd.fast !== undefined ? { fast: cmd.fast } : {}), ...(cmd.notices?.length ? { notices: cmd.notices } : {}), ...(cmd.suggestion?.trim() ? { suggestion: cmd.suggestion } : {}) }, ...queuedAfter(s, ctx, t, 'done'));
     }
     case 'runner.fail': {
       const t = s.turns[cmd.turnId];
@@ -1085,9 +1115,9 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
         if (r === 'model-unavailable') out.push(ev(ctx, t.branchId, 'layers', `${memberName(s, actor)}’s Claude Code can’t use ${modelLabel(pin)}, so the turn went back to the draft`));
         if (r === 'not-connected') out.push(ev(ctx, t.branchId, 'power', `${memberName(s, actor)}’s Claude isn’t connected, so the turn went back to the draft`));
         if (r === 'not-signed-in') out.push(ev(ctx, t.branchId, 'power', `${memberName(s, actor)}’s Claude Code isn’t signed in for shared turns, so the turn went back to the draft`));
-        return ok(...out);
+        return ok(...out, ...queuedAfter(s, ctx, t, 'failed'));
       }
-      return ok({ type: 'turn.failed', turnId: t.id, failure: cmd.failure });
+      return ok({ type: 'turn.failed', turnId: t.id, failure: cmd.failure }, ...queuedAfter(s, ctx, t, 'failed'));
     }
     case 'runner.decision': {
       const t = s.turns[cmd.turnId];
@@ -1259,7 +1289,7 @@ export function decide(s: SpaceState, ctx: CommandContext, cmd: Command): Decide
     case 'server.note': {
       const t = s.turns[cmd.turnId];
       if (!t || !isActive(t)) return ok();
-      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text });
+      return ok({ type: 'turn.done', turnId: t.id, text: cmd.text }, ...queuedAfter(s, ctx, t, 'failed'));
     }
   }
   return fail('Unknown command.');

@@ -118,6 +118,7 @@ export function eventAudience(before: SpaceState, after: SpaceState, e: SpaceEve
     case 'turn.work':
     case 'turn.steered':
     case 'turn.steers-taken':
+    case 'turn.unsteered':
       return turnAudience(e.turnId);
     case 'sharing.changed': return [e.memberId];
     case 'member.budget': return [e.memberId];

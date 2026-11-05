@@ -36,6 +36,8 @@ export type Command =
   | { type: 'turn.resolve'; turnId: Id; pick: string }
   | { type: 'turn.stop'; turnId: Id }
   | { type: 'turn.steer'; turnId: Id; text: string }
+  /** Takes back this person's steers Claude hasn't read yet. */
+  | { type: 'turn.unsteer'; turnId: Id }
   | { type: 'turn.takeover'; turnId: Id }
   | { type: 'turn.retry'; turnId: Id }
   | { type: 'turn.reveal'; turnId: Id }

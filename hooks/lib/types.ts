@@ -259,6 +259,8 @@ export interface Steer {
   by: MemberId;
   text: string;
   at: number;
+  /** Taken back by its writer before Claude read it (Claude Code's ↑ on a queued message). */
+  withdrawn?: boolean;
 }
 
 export interface Turn {

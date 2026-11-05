@@ -45,6 +45,7 @@ const SPECS: Record<Command['type'], Spec> = {
   'turn.resolve': { turnId: 'id', pick: 'str:80' },
   'turn.stop': { turnId: 'id' },
   'turn.steer': { turnId: 'id', text: TEXT },
+  'turn.unsteer': { turnId: 'id' },
   'turn.takeover': { turnId: 'id' },
   'turn.retry': { turnId: 'id' },
   'turn.reveal': { turnId: 'id' },
