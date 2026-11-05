@@ -269,7 +269,13 @@ export function apply(prev: SpaceState, e: SpaceEvent): SpaceState {
     }
     case 'turn.steers-taken': {
       const t = s.turns[e.turnId];
-      if (t && e.through > (t.steersTaken ?? 0)) s = patchTurn(s, e.turnId, { steersTaken: e.through });
+      // Each newly read one shows after the steps there were when its session took it.
+      if (t && e.through > (t.steersTaken ?? 0)) s = patchTurn(s, e.turnId, { steersTaken: e.through, steers: (t.steers ?? []).map((x) => (x.n <= e.through && x.step === undefined ? { ...x, step: t.steps.length } : x)) });
+      return s;
+    }
+    case 'turn.steers-carried': {
+      const t = s.turns[e.turnId];
+      if (t) s = patchTurn(s, e.turnId, { steers: (t.steers ?? []).map((x) => (e.ns.includes(x.n) ? { ...x, carried: e.to } : x)) });
       return s;
     }
     case 'turn.done':

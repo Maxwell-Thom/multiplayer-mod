@@ -186,7 +186,8 @@ function queuedAfter(s: SpaceState, ctx: CommandContext, t: Turn, ended: 'done' 
   const unread = (t.steers ?? []).filter((x) => x.n > (t.steersTaken ?? 0) && !x.withdrawn && !slashRefusal(x.text));
   const b = s.branches[t.branchId];
   if (!unread.length || !b || isOneOff(t) || b.state === 'merged') return [];
-  const back = (): EventBody[] => unread.map((x, i) => ({ type: 'part.added', part: { id: ctx.id('p'), branchId: b.id, memberId: x.by, text: x.text, at: ctx.now + i } }));
+  const ns = unread.map((x) => x.n);
+  const back = (): EventBody[] => [{ type: 'turn.steers-carried', turnId: t.id, ns, to: 'draft' }, ...unread.map((x, i): EventBody => ({ type: 'part.added', part: { id: ctx.id('p'), branchId: b.id, memberId: x.by, text: x.text, at: ctx.now + i } }))];
   if (ended === 'failed') return back();
   const sender = unread[0].by;
   const m = s.members[sender];
@@ -195,7 +196,7 @@ function queuedAfter(s: SpaceState, ctx: CommandContext, t: Turn, ended: 'done' 
   if (!routed(route)) return back();
   const oks = oksFor(s, b, sender, route.runnerId);
   const turn = turnFrom(ctx, s, b, unread.map((x) => ({ memberId: x.by, text: x.text })), { senderId: sender, runnerId: route.runnerId, status: oks.length ? 'held' : 'requested' });
-  return [...route.events, { type: 'turn.requested', turn, consumed: [] }, ...askEvents(ctx, b, turn, oks)];
+  return [{ type: 'turn.steers-carried', turnId: t.id, ns, to: turn.id }, ...route.events, { type: 'turn.requested', turn, consumed: [] }, ...askEvents(ctx, b, turn, oks)];
 }
 
 function turnFrom(ctx: CommandContext, s: SpaceState, branch: Branch, parts: Turn['parts'], patch: Partial<Turn> = {}): Turn {

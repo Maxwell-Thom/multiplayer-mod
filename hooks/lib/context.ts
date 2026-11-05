@@ -409,7 +409,8 @@ function fullTurn(s: SpaceState, t: Turn, r: Reader, nested = false): string {
   const who = t.mode === 'merge-note' ? 'Merge note'
     : t.mode === 'reveal' ? `Positions people held back (unattributed):\n${t.parts.map((p, i) => `${i + 1}. ${p.text}`).join('\n')}`
     : partsText(s, t, t.mode !== 'view-first');
-  const added = (t.steers ?? []).filter((x) => !x.withdrawn).map((x) => `\n(${memberName(s, x.by)} added while Claude worked: ${x.text})`).join('');
+  // (One that went on to the next turn is that turn's own words, not this one's.)
+  const added = (t.steers ?? []).filter((x) => !x.withdrawn && !x.carried).map((x) => `\n(${memberName(s, x.by)} added while Claude worked: ${x.text})`).join('');
   const own = t.steps.filter((x) => x.under === undefined);
   const steps = own.length ? `\n[Claude used ${own.length} step${own.length === 1 ? '' : 's'}: ${own.map((x) => x.text).join('; ')}]` : '';
   const answer = (t.status === 'done' ? t.text : t.status === 'stopped' ? `${t.text} [stopped]` : `[${t.status}]`) + filesLine(s, t.files, 'shared with everyone');

@@ -261,6 +261,10 @@ export interface Steer {
   at: number;
   /** Taken back by its writer before Claude read it (Claude Code's ↑ on a queued message). */
   withdrawn?: boolean;
+  /** Read: how many steps the turn had when its session took it (it shows after them). */
+  step?: number;
+  /** Never read: the turn it started when this one ended, or 'draft' when it went back as a part. */
+  carried?: Id | 'draft';
 }
 
 export interface Turn {
