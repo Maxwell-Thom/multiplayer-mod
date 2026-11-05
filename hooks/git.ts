@@ -72,10 +72,16 @@ export function normalizeOrigin(url: string): string {
 
 /**
  * The project's fingerprint for the server's move check: the first 16 hex of SHA-256 over the
- * space's id and the normalized origin. Null without a repository or an origin. It never names
- * the project, and differs from space to space.
+ * space's id and the project's first commit, or its normalized origin before there's a commit.
+ * Null without a repository. It never names the project, and differs from space to space.
  */
 export async function repoPrint(sh: Shell, spaceId: string): Promise<string | null> {
+  // The project's first commit (along first parents, so a merged-in history doesn't change it):
+  // every clone and fork has it, whatever its remote is called; another project never does.
+  // (Found live: Kim reached the remote as git://127.0.0.1/crappy.git and Ada as /shared/crappy.git.)
+  const root = (await gitOk(sh, ['rev-list', '--max-parents=0', '--first-parent', 'HEAD']))?.split('\n').filter(Boolean).pop()
+  if (root && /^[0-9a-f]{40,64}$/.test(root)) return sha256Hex(`${spaceId}\nroot:${root}`).slice(0, 16)
+  // No commits yet: its origin, written one way.
   const origin = await gitOk(sh, ['remote', 'get-url', 'origin'])
   if (!origin) return null
   return sha256Hex(`${spaceId}\n${normalizeOrigin(origin)}`).slice(0, 16)
